@@ -20,6 +20,7 @@ from .kb import (
 from .pacing import PACING_SYSTEM, analyze_pacing_prompt
 from .rewrite import REWRITE_SYSTEM, rewrite_passage_prompt
 from .style import STYLE_SYSTEM, extract_style_prompt, check_drift_prompt
+from .digest import DIGEST_SYSTEM, digest_plot_prompt
 
 __all__ = [
     "PLAN_SYSTEM",
@@ -44,4 +45,9 @@ __all__ = [
     "analyze_pacing_prompt",
     "REWRITE_SYSTEM",
     "rewrite_passage_prompt",
+    "STYLE_SYSTEM",
+    "extract_style_prompt",
+    "check_drift_prompt",
+    "DIGEST_SYSTEM",
+    "digest_plot_prompt",
 ]

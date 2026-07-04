@@ -479,6 +479,43 @@ def cmd_backup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_digest(args: argparse.Namespace) -> int:
+    cfg = Config(args.config)
+    agent = NovelAgent.open(args.project, cfg)
+    text = args.text
+    if not text and args.file:
+        text = open(args.file, encoding="utf-8").read()
+    if not text:
+        _print("请提供情节描述（--text 或 --file）")
+        return 1
+    _print("消化情节素材中...")
+    r = agent.digest_plot(text, apply=not args.dry_run, verbose=True)
+    if not r.get("parsed"):
+        _print("✗ 拆解失败")
+        return 1
+    _print(f"\n{r.get('summary', '')}")
+    ideas = r.get("ideas_added", [])
+    if ideas:
+        _print(f"\n✓ 拆出 {len(ideas)} 条 idea：")
+        for i in ideas:
+            ch = f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
+            _print(f"  [{i['id']}|{i['type']}|优先级{i['priority']}] {i['title']}{ch}")
+            _print(f"    {i.get('reason', '')}")
+    ou = r.get("outline_updated", [])
+    if ou:
+        _print(f"\n✓ 更新 {len(ou)} 章节拍建议：")
+        for o in ou:
+            _print(f"  {o['chapter_id']} [{o['confidence']}]: {o['addition']}")
+    ne = r.get("new_elements", [])
+    if ne:
+        _print(f"\nℹ️ 发现 {len(ne)} 个可能需要的新设定（未自动入库）：")
+        for n in ne:
+            _print(f"  [{n.get('kind')}] {n.get('name')}：{n.get('summary')}")
+    if args.dry_run:
+        _print("\n（--dry-run 模式，未实际写入）")
+    return 0
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     cfg = Config(args.config)
     agent = NovelAgent.open(args.project, cfg)
@@ -699,6 +736,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("project")
     sp.add_argument("--list", action="store_true", help="列出所有备份")
     sp.set_defaults(func=cmd_backup)
+
+    # 情节消化
+    sp = sub.add_parser("digest", help="自然语言情节 → 自动拆解入库（idea+大纲节拍）")
+    sp.add_argument("project")
+    sp.add_argument("--text", "-t", help="情节描述文本")
+    sp.add_argument("--file", "-f", help="从文件读取情节描述")
+    sp.add_argument("--dry-run", action="store_true", help="只拆解不写入")
+    sp.set_defaults(func=cmd_digest)
 
     # 版本管理
     sp = sub.add_parser("version", help="章节版本管理")

@@ -769,6 +769,107 @@ class NovelAgent:
         sd = StyleData.load(self.dir, self.project.name)
         return sd.render_for_prompt() or "(暂无文风指纹，用 style --analyze 提取)"
 
+    # ================ 情节消化（自然语言 → 拆解入库）================
+    def digest_plot(
+        self,
+        raw_text: str,
+        *,
+        apply: bool = True,
+        verbose: bool = False,
+    ) -> dict[str, Any]:
+        """把一段自然语言情节描述，自动拆解填充到 idea 库 + 大纲。
+
+        apply=True 时直接写入 ideas.json 并把节拍建议追加到大纲章节备注。
+        返回拆解报告。
+        """
+        from ..prompts import DIGEST_SYSTEM, digest_plot_prompt
+        from .llm_helpers import call_json_with_usage
+
+        known_chars = [c.name for c in self.bible.characters]
+        turns = digest_plot_prompt(
+            raw_text,
+            self.project.meta_for_prompt(),
+            self.outline.render_for_prompt(),
+            known_chars,
+        )
+        data, usage = call_json_with_usage(
+            self.backend, DIGEST_SYSTEM, turns, temperature=0.6, max_tokens=2500
+        )
+        try:
+            self.log_usage(op="digest", model="", usage=usage)
+        except Exception:  # noqa: BLE001
+            pass
+        if not data:
+            return {"parsed": False}
+
+        report: dict[str, Any] = {
+            "parsed": True,
+            "ideas_added": [],
+            "outline_updated": [],
+            "new_elements": [],
+            "summary": data.get("summary", ""),
+        }
+
+        # 1. 写入 ideas
+        for it in data.get("ideas", []) or []:
+            try:
+                idea = self.kb.add_idea(
+                    it.get("content", ""),
+                    title=it.get("title", ""),
+                    type=it.get("type", "other"),
+                    tags=it.get("tags", []) or [],
+                    related_chars=it.get("related_chars", []) or [],
+                    priority=int(it.get("priority", 3) or 3),
+                )
+                # 若建议了章节，标记为 planned
+                sc = it.get("suggested_chapter", "")
+                if sc and apply:
+                    self.kb.ideas.mark_planned(idea.id, sc)
+                report["ideas_added"].append(
+                    {
+                        "id": idea.id,
+                        "title": idea.title,
+                        "type": idea.type.value,
+                        "priority": idea.priority,
+                        "suggested_chapter": sc,
+                        "reason": it.get("reason", ""),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 2. 追加到大纲节拍（追加到 chapter.note，不破坏原 beat）
+        if apply:
+            for ob in data.get("outline_beats", []) or []:
+                cid = ob.get("chapter_id", "")
+                plan = self.outline.find(cid)
+                if plan is None:
+                    continue
+                addition = ob.get("beat_addition", "")
+                if not addition:
+                    continue
+                tag = f"[消化建议|{ob.get('confidence', '?')}] {addition}"
+                plan.note = (plan.note + " | " + tag) if plan.note else tag
+                report["outline_updated"].append(
+                    {
+                        "chapter_id": cid,
+                        "addition": addition,
+                        "confidence": ob.get("confidence"),
+                    }
+                )
+            if report["outline_updated"]:
+                self.outline.save(self.dir)
+
+        # 3. 新元素（只记录到报告，不自动改 bible，让人工确认）
+        report["new_elements"] = data.get("new_elements", []) or []
+
+        self.kb.save_all()
+        if verbose:
+            print(
+                f"  [消化] 拆出 {len(report['ideas_added'])} 条 idea，更新 {len(report['outline_updated'])} 章节拍"
+            )
+        return report
+
     # ================ 搜索 ================
     def build_search_index(
         self, *, with_vectors: bool = True, verbose: bool = False

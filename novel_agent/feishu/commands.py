@@ -50,6 +50,7 @@ class CommandRouter:
 
 💡 记录想法思路：
   #想法 <内容> [#标签] [@人物]   记录灵感到 idea 库
+  #拆解 <自然语言情节>           自动拆成多条 idea + 大纲节拍建议
   #想法列表                       查看所有灵感
 
 🚀 推进小说进度：
@@ -145,6 +146,8 @@ class CommandRouter:
             "cost": self._cmd_cost,
             "备份": self._cmd_backup,
             "backup": self._cmd_backup,
+            "拆解": self._cmd_digest,
+            "digest": self._cmd_digest,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -417,6 +420,51 @@ class CommandRouter:
         return CommandResult(
             text=f"✓ 已备份：{p.name}（{size_kb} KB）", project=project
         )
+
+    def _cmd_digest(self, project: str, args: str) -> CommandResult:
+        """#拆解 <自然语言情节> → 自动拆成 idea + 大纲建议"""
+        if not args.strip():
+            return CommandResult(
+                text=(
+                    "用法：#拆解 <你描述的情节>\n\n"
+                    "例：#拆解 沈渡在走私船上遇到老拾荒者，对方认出造梦机警告回声灯塔是陷阱，"
+                    "同时林夕在梦里唱摇篮曲被陆铮听到\n\n"
+                    "我会自动：拆成多条 idea、建议安插章节、补充大纲节拍。"
+                ),
+                project=project,
+            )
+        agent = self._open(project)
+        r = agent.digest_plot(args.strip(), apply=True)
+        if not r.get("parsed"):
+            return CommandResult(
+                text="⚠️ 拆解失败，模型未返回有效结果。", project=project
+            )
+        lines = [f"🧩 已消化你的情节素材\n\n{r.get('summary', '')}\n"]
+        ideas = r.get("ideas_added", [])
+        if ideas:
+            lines.append(f"\n💡 拆出 {len(ideas)} 条 idea（已入库）：")
+            for i in ideas:
+                ch = (
+                    f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
+                )
+                lines.append(
+                    f"  • [{i['id']}|{i['type']}|优先级{i['priority']}] {i['title']}{ch}\n    {i.get('reason', '')}"
+                )
+        ou = r.get("outline_updated", [])
+        if ou:
+            lines.append(f"\n📝 更新了 {len(ou)} 章的大纲节拍建议：")
+            for o in ou:
+                lines.append(
+                    f"  • {o['chapter_id']} [{o.get('confidence', '?')}]: {o['addition']}"
+                )
+        ne = r.get("new_elements", [])
+        if ne:
+            lines.append("\n🆕 发现可能需要的新设定（未自动入库，请用 CLI 确认）：")
+            for n in ne:
+                lines.append(
+                    f"  • [{n.get('kind')}] {n.get('name')}：{n.get('summary')}"
+                )
+        return CommandResult(text=self._truncate("\n".join(lines)), project=project)
 
     # ============ 自由对话（写作教练模式）============
     def _chat(self, text: str) -> CommandResult:
