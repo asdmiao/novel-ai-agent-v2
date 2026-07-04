@@ -71,6 +71,28 @@ class FeishuBot:
         # 记住最近的 chat_id（便于主动推送；不依赖事件里的 chat_id）
         self._recent_chat_id: str = ""
         self._lock = threading.Lock()
+        # 已处理消息 ID 去重表（防止飞书重试导致重复回复）
+        # key=message_id, value=接收时间戳；定期清理超过 10 分钟的
+        self._processed_ids: dict[str, float] = {}
+
+    def _is_duplicate(self, message_id: str) -> bool:
+        """消息去重：同一 message_id 10 分钟内只处理一次。"""
+        if not message_id:
+            return False
+        import time as _t
+
+        now = _t.time()
+        with self._lock:
+            # 清理过期记录（超过 600 秒）
+            expired = [k for k, v in self._processed_ids.items() if now - v > 600]
+            for k in expired:
+                del self._processed_ids[k]
+            # 检查是否已处理
+            if message_id in self._processed_ids:
+                print(f"[去重] 跳过重复消息 {message_id}", flush=True)
+                return True
+            self._processed_ids[message_id] = now
+            return False
 
     # ============ 启动长连接 ============
     def run(self) -> None:
@@ -114,22 +136,50 @@ class FeishuBot:
             pass
 
     def _on_message(self, data: P2ImMessageReceiveV1) -> None:
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [★★★收到消息事件★★★] 进入处理器", flush=True
-        )
+        """收到消息回调。必须快速返回，否则飞书会因 ACK 超时重发。
+
+        所以这里只做：解析 + 去重判断，然后把实际处理丢到线程里。
+        """
         try:
             msg = data.event.message
             chat_id = msg.chat_id
-            print(f"[收到] chat_id={chat_id}", flush=True)
-            with self._lock:
-                self._recent_chat_id = chat_id or ""
-            # 只处理文本消息
+            msg_id = msg.message_id or ""
             msg_type = msg.message_type
+        except Exception:  # noqa: BLE001
+            return
+
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [收到] id={msg_id} chat={chat_id} type={msg_type}",
+            flush=True,
+        )
+
+        # ① 去重：同一 message_id 只处理一次（防止飞书重试导致重复回复）
+        if self._is_duplicate(msg_id):
+            return
+
+        with self._lock:
+            if chat_id:
+                self._recent_chat_id = chat_id
+
+        # ② 异步处理（含 LLM 调用的慢操作），让本回调立即返回 → SDK 及时 ACK
+        threading.Thread(
+            target=self._handle_message_sync,
+            args=(chat_id, msg_type, msg.content if hasattr(msg, "content") else None),
+            daemon=True,
+        ).start()
+
+    def _handle_message_sync(
+        self, chat_id: str, msg_type: str, raw_content: Any
+    ) -> None:
+        """在后台线程里实际处理消息并回复（慢操作放这里，不阻塞事件回调）。"""
+        try:
             if msg_type != "text":
                 self.send_text(chat_id, "目前只支持文本消息。发送 #帮助 查看命令。")
                 return
-            content = json.loads(msg.content)
-            # 飞书文本消息格式是 {"text": "..."}（不是 content）
+            if not raw_content:
+                self.send_text(chat_id, "（消息内容为空）")
+                return
+            content = json.loads(raw_content)
             text = ""
             if isinstance(content, dict):
                 text = (content.get("text") or content.get("content") or "").strip()
@@ -137,7 +187,7 @@ class FeishuBot:
             import re as _re
 
             text = _re.sub(r"@_user_\d+", "", text).strip()
-            print(f"[解析] 文本内容: {text[:80]!r}", flush=True)
+            print(f"[解析] 文本: {text[:80]!r}", flush=True)
             if not text:
                 self.send_text(chat_id, "（空消息，没识别到文本）")
                 return
@@ -145,10 +195,8 @@ class FeishuBot:
             print(
                 f"[回复] 长度={len(result.text)} is_task={result.is_task}", flush=True
             )
-            # 先回复即时消息
             ok = self.send_text(chat_id, result.text)
             print(f"[发送] 结果={ok}", flush=True)
-            # 若是长任务，异步执行
             if result.is_task:
                 self._run_task_async(chat_id, result)
         except Exception as e:  # noqa: BLE001
