@@ -292,11 +292,28 @@ class FeishuBot:
 
     @staticmethod
     def _split(text: str, size: int) -> list[str]:
+        """按段落边界智能分段，避免把一句话从中间切断。"""
         if len(text) <= size:
             return [text]
-        out = []
-        for i in range(0, len(text), size):
-            out.append(text[i : i + size])
+        out: list[str] = []
+        buf = ""
+        for para in text.split("\n"):
+            # 这段加上 buffer 还放得下
+            if len(buf) + len(para) + 1 <= size:
+                buf = buf + "\n" + para if buf else para
+            else:
+                # buffer 满了，先存
+                if buf:
+                    out.append(buf)
+                # 单个段落就超长，硬切
+                if len(para) > size:
+                    for i in range(0, len(para), size):
+                        out.append(para[i : i + size])
+                    buf = ""
+                else:
+                    buf = para
+        if buf:
+            out.append(buf)
         return out
 
 

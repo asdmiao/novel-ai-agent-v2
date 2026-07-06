@@ -172,11 +172,16 @@ class CommandRouter:
         return NovelAgent.open(project or self.default_project, self.config)
 
     def _truncate(self, text: str) -> str:
-        if len(text) <= self.max_chars:
+        """不再硬截断——bot 的 send_text 会自动分段发送。
+
+        仅在超长（超过 30 条飞书消息的上限）时给提示，避免发几十条消息刷屏。
+        """
+        HARD_LIMIT = self.max_chars * 30  # 约 84000 字
+        if len(text) <= HARD_LIMIT:
             return text
         return (
-            text[: self.max_chars]
-            + f"\n\n…（共 {len(text)} 字，已截断。用 CLI 查看完整内容）"
+            text[:HARD_LIMIT]
+            + f"\n\n…（共 {len(text)} 字，已截断到 {HARD_LIMIT} 字。用 CLI 查看完整内容）"
         )
 
     # ============ 各命令实现 ============
