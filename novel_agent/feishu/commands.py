@@ -459,11 +459,9 @@ class CommandRouter:
                 )
         ne = r.get("new_elements", [])
         if ne:
-            lines.append("\n🆕 发现可能需要的新设定（未自动入库，请用 CLI 确认）：")
+            lines.append("\n🆕 新设定已自动入库：")
             for n in ne:
-                lines.append(
-                    f"  • [{n.get('kind')}] {n.get('name')}：{n.get('summary')}"
-                )
+                lines.append(f"  • [{n.get('kind')}] {n.get('name')}（{n.get('id')}）")
         return CommandResult(text=self._truncate("\n".join(lines)), project=project)
 
     # ============ 自由对话（写作教练模式）============

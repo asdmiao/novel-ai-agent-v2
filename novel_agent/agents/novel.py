@@ -860,13 +860,81 @@ class NovelAgent:
             if report["outline_updated"]:
                 self.outline.save(self.dir)
 
-        # 3. 新元素（只记录到报告，不自动改 bible，让人工确认）
-        report["new_elements"] = data.get("new_elements", []) or []
+        # 3. 新元素：自动入库到 bible（人物/地点/势力/设定）
+        added_elements: list[dict[str, Any]] = []
+        for ne in data.get("new_elements", []) or []:
+            kind = ne.get("kind", "")
+            name = ne.get("name", "").strip()
+            summary = ne.get("summary", "").strip()
+            if not name:
+                continue
+            try:
+                if kind == "character":
+                    # 去重：已存在同名人物则跳过
+                    if any(
+                        name in c.name or c.name in name for c in self.bible.characters
+                    ):
+                        continue
+                    eid = f"char_{len(self.bible.characters) + 1:03d}"
+                    from ..core.bible import Character
+
+                    self.bible.characters.append(
+                        Character(id=eid, name=name, summary=summary, role="配角")
+                    )
+                    added_elements.append(
+                        {"kind": "character", "id": eid, "name": name}
+                    )
+                elif kind == "location":
+                    if any(
+                        name in l.name or l.name in name for l in self.bible.locations
+                    ):
+                        continue
+                    eid = f"loc_{len(self.bible.locations) + 1:03d}"
+                    from ..core.bible import Location
+
+                    self.bible.locations.append(
+                        Location(id=eid, name=name, summary=summary)
+                    )
+                    added_elements.append({"kind": "location", "id": eid, "name": name})
+                elif kind == "faction":
+                    if any(
+                        name in f.name or f.name in name for f in self.bible.factions
+                    ):
+                        continue
+                    eid = f"fac_{len(self.bible.factions) + 1:03d}"
+                    from ..core.bible import Faction
+
+                    self.bible.factions.append(
+                        Faction(id=eid, name=name, summary=summary)
+                    )
+                    added_elements.append({"kind": "faction", "id": eid, "name": name})
+                elif kind in ("lore", "world"):
+                    if any(
+                        name in lo.name or lo.name in name for lo in self.bible.lore
+                    ):
+                        continue
+                    eid = f"lore_{len(self.bible.lore) + 1:03d}"
+                    from ..core.bible import Lore
+
+                    self.bible.lore.append(
+                        Lore(
+                            id=eid,
+                            name=name,
+                            summary=summary,
+                            description=ne.get("why", ""),
+                        )
+                    )
+                    added_elements.append({"kind": "lore", "id": eid, "name": name})
+            except Exception:  # noqa: BLE001
+                pass
+        report["new_elements"] = added_elements
 
         self.kb.save_all()
         if verbose:
             print(
-                f"  [消化] 拆出 {len(report['ideas_added'])} 条 idea，更新 {len(report['outline_updated'])} 章节拍"
+                f"  [消化] 拆出 {len(report['ideas_added'])} 条 idea，"
+                f"更新 {len(report['outline_updated'])} 章节拍，"
+                f"新增 {len(added_elements)} 个设定"
             )
         return report
 

@@ -115,28 +115,39 @@ class Memory:
         # 故事线脉络（让 LLM 知道当前在哪条线的哪个节点）
         threads_text = self.threads.render_for_prompt(only_active=True)
 
-        # 相关 idea（本章出场人物/关键词相关的高优先级灵感）
+        # 相关 idea：优先 placed_chapter==本章 的，再补充人物匹配的
         ideas_text = ""
         available = self.ideas.available()
         if available:
-            pool = available
-            # 按本章人物筛选
+            # ① 第一优先：digest 明确规划到本章的 idea（连接 idea 与大纲的关键）
+            planned_for_this = [i for i in available if i.placed_chapter == chapter_id]
+            # ② 第二优先：按本章人物匹配
             chapter_chars = (
                 [plan.pov] + (plan.characters or [])
                 if plan.pov
                 else (plan.characters or [])
             )
+            char_matched: list = []
             if chapter_chars:
-                filtered = [
+                char_matched = [
                     i
-                    for i in pool
-                    if any(
+                    for i in available
+                    if i not in planned_for_this
+                    and any(
                         any(ic in ch or ch in ic for ic in i.related_chars)
                         for ch in chapter_chars
                     )
                 ]
-                pool = filtered or pool
-            pool = sorted(pool, key=lambda i: -i.priority)[:5]
+            # 合并：规划到本章的在前，人物匹配的在后，去重
+            pool = planned_for_this + char_matched
+            seen = set()
+            deduped = []
+            for i in pool:
+                if i.id not in seen:
+                    seen.add(i.id)
+                    deduped.append(i)
+            pool = deduped or available  # 兜底：都没有就全量
+            pool = sorted(pool, key=lambda i: -i.priority)[:8]
             ideas_text = self.ideas.render_for_prompt(pool)
 
         parts = [

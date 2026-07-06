@@ -508,9 +508,9 @@ def cmd_digest(args: argparse.Namespace) -> int:
             _print(f"  {o['chapter_id']} [{o['confidence']}]: {o['addition']}")
     ne = r.get("new_elements", [])
     if ne:
-        _print(f"\nℹ️ 发现 {len(ne)} 个可能需要的新设定（未自动入库）：")
+        _print(f"\n✓ 新增 {len(ne)} 个设定（已自动入库）：")
         for n in ne:
-            _print(f"  [{n.get('kind')}] {n.get('name')}：{n.get('summary')}")
+            _print(f"  [{n.get('kind')}] {n.get('name')}（{n.get('id')}）")
     if args.dry_run:
         _print("\n（--dry-run 模式，未实际写入）")
     return 0
