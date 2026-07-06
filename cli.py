@@ -488,31 +488,41 @@ def cmd_digest(args: argparse.Namespace) -> int:
     if not text:
         _print("请提供情节描述（--text 或 --file）")
         return 1
-    _print("消化情节素材中...")
-    r = agent.digest_plot(text, apply=not args.dry_run, verbose=True)
+    _print("忠实拆解情节中（不自行扩展）...")
+    r = agent.digest_plot(
+        text,
+        update_bible=args.update_bible,
+        update_outline=False,  # 大纲始终手动维护
+        verbose=True,
+    )
     if not r.get("parsed"):
         _print("✗ 拆解失败")
         return 1
-    _print(f"\n{r.get('summary', '')}")
+    cn = r.get("count_note", "")
+    if cn:
+        _print(f"\n{cn}")
     ideas = r.get("ideas_added", [])
     if ideas:
-        _print(f"\n✓ 拆出 {len(ideas)} 条 idea：")
+        _print(f"\n✓ 拆出 {len(ideas)} 条 idea（已入库）：")
         for i in ideas:
             ch = f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
-            _print(f"  [{i['id']}|{i['type']}|优先级{i['priority']}] {i['title']}{ch}")
-            _print(f"    {i.get('reason', '')}")
-    ou = r.get("outline_updated", [])
-    if ou:
-        _print(f"\n✓ 更新 {len(ou)} 章节拍建议：")
-        for o in ou:
-            _print(f"  {o['chapter_id']} [{o['confidence']}]: {o['addition']}")
+            _print(f"  [{i['id']}|{i['type']}] {i['title']}{ch}")
+            src = i.get("from_original", "")
+            if src:
+                _print(f"    原文: {src[:60]}")
     ne = r.get("new_elements", [])
     if ne:
-        _print(f"\n✓ 新增 {len(ne)} 个设定（已自动入库）：")
-        for n in ne:
-            _print(f"  [{n.get('kind')}] {n.get('name')}（{n.get('id')}）")
-    if args.dry_run:
-        _print("\n（--dry-run 模式，未实际写入）")
+        if args.update_bible:
+            _print(f"\n✓ 新增 {len(ne)} 个设定（已入库）：")
+            for n in ne:
+                _print(f"  [{n.get('kind')}] {n.get('name')}（{n.get('id')}）")
+        else:
+            _print(f"\nℹ️ 发现 {len(ne)} 个新设定（未入库，加 --update-bible 才写入）：")
+            for n in ne:
+                _print(
+                    f"  [{n.get('kind')}] {n.get('name')}：{n.get('summary', '')[:50]}"
+                )
+    _print("\n💡 大纲由你手动维护，不会自动改。")
     return 0
 
 
@@ -738,11 +748,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_backup)
 
     # 情节消化
-    sp = sub.add_parser("digest", help="自然语言情节 → 自动拆解入库（idea+大纲节拍）")
+    sp = sub.add_parser("digest", help="忠实拆解情节为idea（不自行扩展，不动大纲）")
     sp.add_argument("project")
     sp.add_argument("--text", "-t", help="情节描述文本")
     sp.add_argument("--file", "-f", help="从文件读取情节描述")
-    sp.add_argument("--dry-run", action="store_true", help="只拆解不写入")
+    sp.add_argument(
+        "--update-bible",
+        action="store_true",
+        help="把新人物/设定写入设定集（默认不写）",
+    )
     sp.set_defaults(func=cmd_digest)
 
     # 版本管理

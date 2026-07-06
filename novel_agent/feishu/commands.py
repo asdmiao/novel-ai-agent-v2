@@ -422,24 +422,29 @@ class CommandRouter:
         )
 
     def _cmd_digest(self, project: str, args: str) -> CommandResult:
-        """#拆解 <自然语言情节> → 自动拆成 idea + 大纲建议"""
+        """#拆解 <情节> → 忠实拆成 idea（不动大纲/设定）"""
         if not args.strip():
             return CommandResult(
                 text=(
                     "用法：#拆解 <你描述的情节>\n\n"
-                    "例：#拆解 沈渡在走私船上遇到老拾荒者，对方认出造梦机警告回声灯塔是陷阱，"
-                    "同时林夕在梦里唱摇篮曲被陆铮听到\n\n"
-                    "我会自动：拆成多条 idea、建议安插章节、补充大纲节拍。"
+                    "例：#拆解 沈渡在走私船遇到老拾荒者警告他回声灯塔是陷阱\n\n"
+                    "我会忠实拆解成 idea（不自行扩展），不动大纲和设定。\n"
+                    "加 #入库 后缀才会把新人物/设定写入设定集，如：\n"
+                    "#拆解 主角得到一把古剑 #入库"
                 ),
                 project=project,
             )
+        # 解析 #入库 标记
+        update_bible = "#入库" in args or "#保存" in args
+        clean_args = args.replace("#入库", "").replace("#保存", "").strip()
         agent = self._open(project)
-        r = agent.digest_plot(args.strip(), apply=True)
+        r = agent.digest_plot(clean_args, update_bible=update_bible)
         if not r.get("parsed"):
-            return CommandResult(
-                text="⚠️ 拆解失败，模型未返回有效结果。", project=project
-            )
-        lines = [f"🧩 已消化你的情节素材\n\n{r.get('summary', '')}\n"]
+            return CommandResult(text="⚠️ 拆解失败", project=project)
+        lines = ["🧩 已忠实拆解你的情节"]
+        cn = r.get("count_note", "")
+        if cn:
+            lines.append(f"（{cn}）")
         ideas = r.get("ideas_added", [])
         if ideas:
             lines.append(f"\n💡 拆出 {len(ideas)} 条 idea（已入库）：")
@@ -447,21 +452,26 @@ class CommandRouter:
                 ch = (
                     f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
                 )
-                lines.append(
-                    f"  • [{i['id']}|{i['type']}|优先级{i['priority']}] {i['title']}{ch}\n    {i.get('reason', '')}"
-                )
-        ou = r.get("outline_updated", [])
-        if ou:
-            lines.append(f"\n📝 更新了 {len(ou)} 章的大纲节拍建议：")
-            for o in ou:
-                lines.append(
-                    f"  • {o['chapter_id']} [{o.get('confidence', '?')}]: {o['addition']}"
-                )
+                lines.append(f"  • [{i['id']}|{i['type']}] {i['title']}{ch}")
+        else:
+            lines.append("\n（未拆出 idea）")
         ne = r.get("new_elements", [])
         if ne:
-            lines.append("\n🆕 新设定已自动入库：")
-            for n in ne:
-                lines.append(f"  • [{n.get('kind')}] {n.get('name')}（{n.get('id')}）")
+            if update_bible:
+                lines.append(f"\n🆕 新设定已入库（{len(ne)}个）：")
+                for n in ne:
+                    lines.append(
+                        f"  • [{n.get('kind')}] {n.get('name')}（{n.get('id')}）"
+                    )
+            else:
+                lines.append(
+                    f"\nℹ️ 发现 {len(ne)} 个新设定（未入库，加 #入库 才写入）："
+                )
+                for n in ne:
+                    lines.append(
+                        f"  • [{n.get('kind')}] {n.get('name')}：{n.get('summary', '')[:40]}"
+                    )
+        lines.append("\n💡 大纲和设定由你手动维护，我不会自动改。")
         return CommandResult(text=self._truncate("\n".join(lines)), project=project)
 
     # ============ 自由对话（写作教练模式）============

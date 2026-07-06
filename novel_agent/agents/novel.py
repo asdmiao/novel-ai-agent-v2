@@ -774,13 +774,17 @@ class NovelAgent:
         self,
         raw_text: str,
         *,
-        apply: bool = True,
+        update_bible: bool = False,
+        update_outline: bool = False,
         verbose: bool = False,
     ) -> dict[str, Any]:
-        """把一段自然语言情节描述，自动拆解填充到 idea 库 + 大纲。
+        """把一段自然语言情节描述，忠实拆解成 idea。
 
-        apply=True 时直接写入 ideas.json 并把节拍建议追加到大纲章节备注。
-        返回拆解报告。
+        严格忠实于原文，不自行扩展。
+        - idea 总是写入 ideas.json（这是消化功能的本职）
+        - update_bible=False（默认）：新人物/设定只记录到报告，不动 bible
+        - update_outline=False（默认）：不给大纲建议，不动 outline
+        作者手动维护大纲和设定，避免自动更新打乱前期思路。
         """
         from ..prompts import DIGEST_SYSTEM, digest_plot_prompt
         from .llm_helpers import call_json_with_usage
@@ -793,7 +797,7 @@ class NovelAgent:
             known_chars,
         )
         data, usage = call_json_with_usage(
-            self.backend, DIGEST_SYSTEM, turns, temperature=0.6, max_tokens=2500
+            self.backend, DIGEST_SYSTEM, turns, temperature=0.4, max_tokens=2500
         )
         try:
             self.log_usage(op="digest", model="", usage=usage)
@@ -805,12 +809,11 @@ class NovelAgent:
         report: dict[str, Any] = {
             "parsed": True,
             "ideas_added": [],
-            "outline_updated": [],
             "new_elements": [],
-            "summary": data.get("summary", ""),
+            "count_note": data.get("count_note", ""),
         }
 
-        # 1. 写入 ideas
+        # 1. 写入 ideas（始终写入，这是消化的本职）
         for it in data.get("ideas", []) or []:
             try:
                 idea = self.kb.add_idea(
@@ -821,9 +824,8 @@ class NovelAgent:
                     related_chars=it.get("related_chars", []) or [],
                     priority=int(it.get("priority", 3) or 3),
                 )
-                # 若建议了章节，标记为 planned
                 sc = it.get("suggested_chapter", "")
-                if sc and apply:
+                if sc:
                     self.kb.ideas.mark_planned(idea.id, sc)
                 report["ideas_added"].append(
                     {
@@ -832,110 +834,105 @@ class NovelAgent:
                         "type": idea.type.value,
                         "priority": idea.priority,
                         "suggested_chapter": sc,
-                        "reason": it.get("reason", ""),
+                        "from_original": it.get("from_original", ""),
                     }
                 )
             except Exception:  # noqa: BLE001
                 pass
 
-        # 2. 追加到大纲节拍（追加到 chapter.note，不破坏原 beat）
-        if apply:
-            for ob in data.get("outline_beats", []) or []:
-                cid = ob.get("chapter_id", "")
-                plan = self.outline.find(cid)
-                if plan is None:
+        # 2. 新元素：默认只记录到报告，update_bible=True 才入库
+        new_elems_raw = data.get("new_elements", []) or []
+        if update_bible:
+            added_elements: list[dict[str, Any]] = []
+            for ne in new_elems_raw:
+                kind = ne.get("kind", "")
+                name = ne.get("name", "").strip()
+                summary = ne.get("summary", "").strip()
+                if not name:
                     continue
-                addition = ob.get("beat_addition", "")
-                if not addition:
-                    continue
-                tag = f"[消化建议|{ob.get('confidence', '?')}] {addition}"
-                plan.note = (plan.note + " | " + tag) if plan.note else tag
-                report["outline_updated"].append(
-                    {
-                        "chapter_id": cid,
-                        "addition": addition,
-                        "confidence": ob.get("confidence"),
-                    }
-                )
-            if report["outline_updated"]:
-                self.outline.save(self.dir)
+                try:
+                    if kind == "character":
+                        if any(
+                            name in c.name or c.name in name
+                            for c in self.bible.characters
+                        ):
+                            continue
+                        eid = f"char_{len(self.bible.characters) + 1:03d}"
+                        from ..core.bible import Character
 
-        # 3. 新元素：自动入库到 bible（人物/地点/势力/设定）
-        added_elements: list[dict[str, Any]] = []
-        for ne in data.get("new_elements", []) or []:
-            kind = ne.get("kind", "")
-            name = ne.get("name", "").strip()
-            summary = ne.get("summary", "").strip()
-            if not name:
-                continue
-            try:
-                if kind == "character":
-                    # 去重：已存在同名人物则跳过
-                    if any(
-                        name in c.name or c.name in name for c in self.bible.characters
-                    ):
-                        continue
-                    eid = f"char_{len(self.bible.characters) + 1:03d}"
-                    from ..core.bible import Character
-
-                    self.bible.characters.append(
-                        Character(id=eid, name=name, summary=summary, role="配角")
-                    )
-                    added_elements.append(
-                        {"kind": "character", "id": eid, "name": name}
-                    )
-                elif kind == "location":
-                    if any(
-                        name in l.name or l.name in name for l in self.bible.locations
-                    ):
-                        continue
-                    eid = f"loc_{len(self.bible.locations) + 1:03d}"
-                    from ..core.bible import Location
-
-                    self.bible.locations.append(
-                        Location(id=eid, name=name, summary=summary)
-                    )
-                    added_elements.append({"kind": "location", "id": eid, "name": name})
-                elif kind == "faction":
-                    if any(
-                        name in f.name or f.name in name for f in self.bible.factions
-                    ):
-                        continue
-                    eid = f"fac_{len(self.bible.factions) + 1:03d}"
-                    from ..core.bible import Faction
-
-                    self.bible.factions.append(
-                        Faction(id=eid, name=name, summary=summary)
-                    )
-                    added_elements.append({"kind": "faction", "id": eid, "name": name})
-                elif kind in ("lore", "world"):
-                    if any(
-                        name in lo.name or lo.name in name for lo in self.bible.lore
-                    ):
-                        continue
-                    eid = f"lore_{len(self.bible.lore) + 1:03d}"
-                    from ..core.bible import Lore
-
-                    self.bible.lore.append(
-                        Lore(
-                            id=eid,
-                            name=name,
-                            summary=summary,
-                            description=ne.get("why", ""),
+                        self.bible.characters.append(
+                            Character(id=eid, name=name, summary=summary, role="配角")
                         )
-                    )
-                    added_elements.append({"kind": "lore", "id": eid, "name": name})
-            except Exception:  # noqa: BLE001
-                pass
-        report["new_elements"] = added_elements
+                        added_elements.append(
+                            {"kind": "character", "id": eid, "name": name}
+                        )
+                    elif kind == "location":
+                        if any(
+                            name in l.name or l.name in name
+                            for l in self.bible.locations
+                        ):
+                            continue
+                        eid = f"loc_{len(self.bible.locations) + 1:03d}"
+                        from ..core.bible import Location
+
+                        self.bible.locations.append(
+                            Location(id=eid, name=name, summary=summary)
+                        )
+                        added_elements.append(
+                            {"kind": "location", "id": eid, "name": name}
+                        )
+                    elif kind == "faction":
+                        if any(
+                            name in f.name or f.name in name
+                            for f in self.bible.factions
+                        ):
+                            continue
+                        eid = f"fac_{len(self.bible.factions) + 1:03d}"
+                        from ..core.bible import Faction
+
+                        self.bible.factions.append(
+                            Faction(id=eid, name=name, summary=summary)
+                        )
+                        added_elements.append(
+                            {"kind": "faction", "id": eid, "name": name}
+                        )
+                    elif kind in ("lore", "world"):
+                        if any(
+                            name in lo.name or lo.name in name for lo in self.bible.lore
+                        ):
+                            continue
+                        eid = f"lore_{len(self.bible.lore) + 1:03d}"
+                        from ..core.bible import Lore
+
+                        self.bible.lore.append(
+                            Lore(
+                                id=eid,
+                                name=name,
+                                summary=summary,
+                                description=ne.get("original_quote", ""),
+                            )
+                        )
+                        added_elements.append({"kind": "lore", "id": eid, "name": name})
+                except Exception:  # noqa: BLE001
+                    pass
+            report["new_elements"] = added_elements
+            if added_elements and verbose:
+                print(f"  [消化] 新增 {len(added_elements)} 个设定入库")
+        else:
+            # 只记录，不入库
+            report["new_elements"] = [
+                {
+                    "kind": ne.get("kind", ""),
+                    "name": ne.get("name", ""),
+                    "summary": ne.get("summary", ""),
+                    "not_added": "未自动入库，如需添加用 update_bible=True",
+                }
+                for ne in new_elems_raw
+            ]
 
         self.kb.save_all()
         if verbose:
-            print(
-                f"  [消化] 拆出 {len(report['ideas_added'])} 条 idea，"
-                f"更新 {len(report['outline_updated'])} 章节拍，"
-                f"新增 {len(added_elements)} 个设定"
-            )
+            print(f"  [消化] 拆出 {len(report['ideas_added'])} 条 idea")
         return report
 
     # ================ 搜索 ================
