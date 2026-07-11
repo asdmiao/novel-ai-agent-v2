@@ -14,6 +14,7 @@ from .bible import Bible
 from .chapter import ChapterStore
 from .continuity import Continuity
 from .ideas import IdeaBank
+from .manifesto import Manifesto
 from .outline import Outline, ChapterStatus
 from .threads import ThreadNetwork
 from .world import World
@@ -33,6 +34,7 @@ class Memory:
         world: World | None = None,
         ideas: IdeaBank | None = None,
         threads: ThreadNetwork | None = None,
+        manifesto: Manifesto | None = None,
         recent_summary_count: int = 3,
         recent_text_chars: int = 600,
     ) -> None:
@@ -44,6 +46,7 @@ class Memory:
         self.world = world or World()
         self.ideas = ideas or IdeaBank()
         self.threads = threads or ThreadNetwork()
+        self.manifesto = manifesto or Manifesto()
         self.recent_summary_count = recent_summary_count
         self.recent_text_chars = recent_text_chars
 
@@ -150,10 +153,15 @@ class Memory:
             pool = sorted(pool, key=lambda i: -i.priority)[:8]
             ideas_text = self.ideas.render_for_prompt(pool)
 
-        parts = [
-            "===== 故事设定 =====",
-            bible_text,
-        ]
+        parts: list[str] = []
+
+        # 📜 主旨——最高优先级，放在第一段
+        manifesto_text = self.manifesto.render_for_prompt()
+        if manifesto_text:
+            parts.append(manifesto_text)
+
+        parts.append("===== 故事设定 =====")
+        parts.append(bible_text)
         if world_constraints:
             parts.append("===== 世界观硬约束（绝对不能违反）=====")
             parts.append(world_constraints)

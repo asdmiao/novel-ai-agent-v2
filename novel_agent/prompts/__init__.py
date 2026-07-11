@@ -21,6 +21,7 @@ from .pacing import PACING_SYSTEM, analyze_pacing_prompt
 from .rewrite import REWRITE_SYSTEM, rewrite_passage_prompt
 from .style import STYLE_SYSTEM, extract_style_prompt, check_drift_prompt
 from .digest import DIGEST_SYSTEM, digest_plot_prompt
+from .enrich import ENRICH_SYSTEM, enrich_prompt, AUDIT_SYSTEM, audit_prompt
 
 __all__ = [
     "PLAN_SYSTEM",
@@ -50,4 +51,8 @@ __all__ = [
     "check_drift_prompt",
     "DIGEST_SYSTEM",
     "digest_plot_prompt",
+    "ENRICH_SYSTEM",
+    "enrich_prompt",
+    "AUDIT_SYSTEM",
+    "audit_prompt",
 ]

@@ -570,6 +570,72 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_manifesto(args: argparse.Namespace) -> int:
+    cfg = Config(args.config)
+    agent = NovelAgent.open(args.project, cfg)
+    if args.set:
+        agent.set_manifesto(
+            core_theme=args.theme,
+            main_thread=args.thread,
+            emotional_tone=args.tone,
+            philosophy=args.philosophy,
+            hard_rules=args.rules.split("|") if args.rules else None,
+            taboos=args.taboos.split("|") if args.taboos else None,
+            style_guide=args.style,
+        )
+        _print("✓ 主旨已更新")
+    _print(agent.view_manifesto())
+    return 0
+
+
+def cmd_enrich(args: argparse.Namespace) -> int:
+    cfg = Config(args.config)
+    agent = NovelAgent.open(args.project, cfg)
+    if not args.target:
+        _print("请用 --target 指定补充目标")
+        return 1
+    _print(f"补充 [{args.target}] 中...")
+    r = agent.enrich(args.target, instruction=args.instruction or "", verbose=True)
+    if not r.get("parsed"):
+        _print("✗ 补充失败")
+        return 1
+    _print(f"\n{r.get('fill_notes', '')}")
+    for i in r.get("new_ideas", []):
+        ch = f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
+        _print(f"\n  💡 [{i['id']}|{i['type']}] {i['title']}{ch}")
+        if i.get("connects_to"):
+            _print(f"     串联: {i['connects_to']}")
+        if i.get("why"):
+            _print(f"     原因: {i['why']}")
+    for c in r.get("connections", []):
+        _print(f"\n  🔗 {c.get('from', '')} → {c.get('to', '')}")
+        _print(f"     {c.get('how', '')[:100]}")
+    return 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    cfg = Config(args.config)
+    agent = NovelAgent.open(args.project, cfg)
+    _print("全面检查中...")
+    r = agent.audit_project()
+    _print(f"\n=== 评分: {r.get('score', '-')}/10 ===")
+    _print(f"\n{r.get('overall', '')}")
+    for m in r.get("missing", []) or []:
+        _print(
+            f"\n  ⚠ [{m.get('severity')}|{m.get('category')}] {m.get('description')}"
+        )
+        _print(f"    位置: {m.get('where', '')} → {m.get('suggestion', '')}")
+    for d in r.get("disconnected", []) or []:
+        _print(f"\n  🔗 游离: {d.get('item', '')}")
+        _print(f"    问题: {d.get('problem', '')}")
+        _print(f"    → {d.get('suggestion', '')}")
+    for imp in r.get("improvements", []) or []:
+        _print(f"\n  📈 {imp.get('area', '')}: {imp.get('suggestion', '')}")
+    for v in r.get("manifesto_violations", []) or []:
+        _print(f"\n  🚫 违反主旨: {v.get('item', '')} → {v.get('rule', '')}")
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace) -> int:
     cfg = Config(args.config)
     agent = NovelAgent.open(args.project, cfg)
@@ -769,6 +835,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_version)
 
     # 进度仪表盘
+    # 主旨
+    sp = sub.add_parser("manifesto", help="作品主旨管理（核心思考/全局约束）")
+    sp.add_argument("project")
+    sp.add_argument("--set", action="store_true", help="设置/更新主旨")
+    sp.add_argument("--theme", help="核心主旨")
+    sp.add_argument("--thread", help="主线脉络")
+    sp.add_argument("--tone", help="情感基调")
+    sp.add_argument("--philosophy", help="哲学立场")
+    sp.add_argument("--rules", help="硬性规则（|分隔）")
+    sp.add_argument("--taboos", help="禁忌（|分隔）")
+    sp.add_argument("--style", help="风格指南")
+    sp.set_defaults(func=cmd_manifesto)
+
+    # 补充
+    sp = sub.add_parser("enrich", help="在主旨约束下补充内容+串联idea")
+    sp.add_argument("project")
+    sp.add_argument("--target", "-t", required=True, help="补充目标（如'c003的情节'）")
+    sp.add_argument("--instruction", "-i", help="具体要求")
+    sp.set_defaults(func=cmd_enrich)
+
+    # 检查
+    sp = sub.add_parser("audit", help="全面检查：缺失/游离/可提高/主旨违反")
+    sp.add_argument("project")
+    sp.set_defaults(func=cmd_audit)
+
     sp = sub.add_parser("stats", help="写作进度仪表盘")
     sp.add_argument("project")
     sp.add_argument("--target", type=int, help="设置每日目标字数")

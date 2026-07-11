@@ -148,6 +148,12 @@ class CommandRouter:
             "backup": self._cmd_backup,
             "拆解": self._cmd_digest,
             "digest": self._cmd_digest,
+            "主旨": self._cmd_manifesto,
+            "manifesto": self._cmd_manifesto,
+            "补充": self._cmd_enrich,
+            "enrich": self._cmd_enrich,
+            "检查": self._cmd_audit,
+            "audit": self._cmd_audit,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -425,6 +431,70 @@ class CommandRouter:
         return CommandResult(
             text=f"✓ 已备份：{p.name}（{size_kb} KB）", project=project
         )
+
+    def _cmd_manifesto(self, project: str, args: str) -> CommandResult:
+        """#主旨 查看/设置作品核心思考"""
+        agent = self._open(project)
+        if not args.strip():
+            return CommandResult(
+                text=agent.view_manifesto() or "(暂无主旨)", project=project
+            )
+        # 设置主旨（简化：整段作为 core_theme）
+        agent.set_manifesto(core_theme=args.strip())
+        return CommandResult(
+            text=f"✓ 核心主旨已更新：\n\n{args.strip()}\n\n💡 用 CLI 可设置更详细的主旨（情感基调/硬规则/禁忌等）",
+            project=project,
+        )
+
+    def _cmd_enrich(self, project: str, args: str) -> CommandResult:
+        """#补充 <目标> → 在主旨约束下生成新idea+串联"""
+        if not args.strip():
+            return CommandResult(
+                text="用法：#补充 <补充目标>\n\n例：#补充 c003到c004的过渡情节，串联老拾荒者警告和记忆灌注\n\n我会在主旨约束下生成新 idea 和串联建议。",
+                project=project,
+            )
+        agent = self._open(project)
+        r = agent.enrich(args.strip())
+        if not r.get("parsed"):
+            return CommandResult(text="⚠️ 补充失败", project=project)
+        lines = [f"🔧 补充完成\n\n{r.get('fill_notes', '')}"]
+        for i in r.get("new_ideas", []):
+            ch = f" → {i['suggested_chapter']}" if i.get("suggested_chapter") else ""
+            lines.append(f"\n💡 [{i['id']}|{i['type']}] {i['title']}{ch}")
+            if i.get("connects_to"):
+                lines.append(f"  串联：{i['connects_to']}")
+        for c in r.get("connections", []):
+            lines.append(f"\n🔗 {c.get('from', '')} → {c.get('to', '')}")
+            lines.append(f"  {c.get('how', '')[:100]}")
+        return CommandResult(text=self._truncate("\n".join(lines)), project=project)
+
+    def _cmd_audit(self, project: str, args: str) -> CommandResult:
+        """#检查 → AI通读全部找缺失和提高点"""
+        agent = self._open(project)
+        r = agent.audit_project()
+        lines = [
+            f"🔍 全面检查报告 | 评分：{r.get('score', '-')}/10\n\n{r.get('overall', '')}"
+        ]
+        missing = r.get("missing", []) or []
+        if missing:
+            lines.append(f"\n⚠️ 缺失（{len(missing)}个）：")
+            for m in missing:
+                lines.append(
+                    f"  [{m.get('severity')}|{m.get('category')}] {m.get('description', '')[:60]}"
+                )
+                lines.append(f"    → {m.get('suggestion', '')[:60]}")
+        disc = r.get("disconnected", []) or []
+        if disc:
+            lines.append(f"\n🔗 游离idea（{len(disc)}个）：")
+            for d in disc:
+                lines.append(f"  {d.get('item', '')[:40]}")
+                lines.append(f"    → {d.get('suggestion', '')[:60]}")
+        imp = r.get("improvements", []) or []
+        if imp:
+            lines.append(f"\n📈 可提高（{len(imp)}处）：")
+            for i in imp:
+                lines.append(f"  {i.get('area', '')}: {i.get('suggestion', '')[:60]}")
+        return CommandResult(text=self._truncate("\n".join(lines)), project=project)
 
     def _cmd_digest(self, project: str, args: str) -> CommandResult:
         """#拆解 <情节> → 忠实拆成 idea（不动大纲/设定）"""

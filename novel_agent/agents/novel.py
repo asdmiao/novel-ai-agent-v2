@@ -29,6 +29,10 @@ from ..core import (
 from ..core.project import PROJECTS_ROOT  # noqa: F401  (kept for compat)
 from ..core.usage import UsageLog
 from ..core.pacing import PacingData
+from ..core.manifesto import Manifesto
+from ..core.search import SearchEngine
+from ..core.usage import UsageLog
+from ..core.pacing import PacingData
 from ..core.search import SearchEngine
 from ..kb import KnowledgeBase
 from ..llm import LLMBackend, build_backend
@@ -81,6 +85,7 @@ class NovelAgent:
         self.world = self.kb.world
         self.ideas = self.kb.ideas
         self.threads = self.kb.threads
+        self.manifesto = Manifesto.load(self.dir, project.name)
         w = config.writing
         self.chapter_words = int(w.get("chapter_words", 2500))
         self.recent_summary_count = int(w.get("recent_summary_count", 3))
@@ -123,6 +128,7 @@ class NovelAgent:
             world=self.world,
             ideas=self.ideas,
             threads=self.threads,
+            manifesto=self.manifesto,
             recent_summary_count=self.recent_summary_count,
             recent_text_chars=self.recent_text_chars,
         )
@@ -1032,3 +1038,130 @@ class NovelAgent:
         if deadline is not None:
             pd.deadline = deadline
         pd.save(self.dir)
+
+    # ================ 主旨管理 ================
+    def set_manifesto(
+        self,
+        *,
+        core_theme: str | None = None,
+        main_thread: str | None = None,
+        emotional_tone: str | None = None,
+        philosophy: str | None = None,
+        hard_rules: list[str] | None = None,
+        style_guide: str | None = None,
+        taboos: list[str] | None = None,
+        notes: str | None = None,
+    ) -> Manifesto:
+        m = self.manifesto
+        if core_theme is not None:
+            m.core_theme = core_theme
+        if main_thread is not None:
+            m.main_thread = main_thread
+        if emotional_tone is not None:
+            m.emotional_tone = emotional_tone
+        if philosophy is not None:
+            m.philosophy = philosophy
+        if hard_rules is not None:
+            m.hard_rules = hard_rules
+        if style_guide is not None:
+            m.style_guide = style_guide
+        if taboos is not None:
+            m.taboos = taboos
+        if notes is not None:
+            m.notes = notes
+        m.save(self.dir)
+        return m
+
+    def view_manifesto(self) -> str:
+        return self.manifesto.render_for_prompt() or "(暂无主旨，用 #主旨 设置)"
+
+    # ================ 补充（enrich）================
+    def enrich(
+        self, target: str, *, instruction: str = "", verbose: bool = False
+    ) -> dict[str, Any]:
+        from ..prompts import ENRICH_SYSTEM, enrich_prompt
+        from .llm_helpers import call_json_with_usage
+
+        manifest = self.manifesto.render_for_prompt() or "(暂无主旨约束)"
+        ideas_t = self.ideas.render_for_prompt(self.ideas.available())
+        turns = enrich_prompt(
+            target,
+            manifest,
+            ideas_t,
+            self.outline.render_for_prompt(),
+            self.bible.render_for_prompt()[:2000],
+            instruction,
+        )
+        data, usage = call_json_with_usage(
+            self.backend, ENRICH_SYSTEM, turns, temperature=0.7, max_tokens=3000
+        )
+        try:
+            self.log_usage(op="enrich", model="", usage=usage)
+        except Exception:
+            pass  # noqa: BLE001
+        if not data:
+            return {"parsed": False}
+        new_ideas: list[dict[str, Any]] = []
+        for it in data.get("new_ideas", []) or []:
+            try:
+                idea = self.kb.add_idea(
+                    it.get("content", ""),
+                    title=it.get("title", ""),
+                    type=it.get("type", "other"),
+                    related_chars=it.get("related_chars", []) or [],
+                    priority=int(it.get("priority", 3) or 3),
+                )
+                sc = it.get("suggested_chapter", "")
+                if sc:
+                    self.kb.ideas.mark_planned(idea.id, sc)
+                new_ideas.append(
+                    {
+                        "id": idea.id,
+                        "title": idea.title,
+                        "type": idea.type.value,
+                        "priority": idea.priority,
+                        "suggested_chapter": sc,
+                        "connects_to": it.get("connects_to", ""),
+                        "why": it.get("why", ""),
+                    }
+                )
+            except Exception:
+                pass  # noqa: BLE001
+        self.kb.save_all()
+        if verbose:
+            print(f"  [补充] 生成 {len(new_ideas)} 条新 idea")
+        return {
+            "parsed": True,
+            "target": target,
+            "new_ideas": new_ideas,
+            "connections": data.get("connections", []) or [],
+            "fill_notes": data.get("fill_notes", ""),
+        }
+
+    # ================ 检查（audit）================
+    def audit_project(self) -> dict[str, Any]:
+        from ..prompts import AUDIT_SYSTEM, audit_prompt
+        from .llm_helpers import call_json_with_usage
+
+        manifest = self.manifesto.render_for_prompt() or "(暂无主旨)"
+        ideas_t = self.ideas.render_for_prompt(self.ideas.ideas)
+        cont_t = self.continuity.render_for_prompt()[:1000]
+        sums = "\n".join(
+            f"[{cid} {s.title}] {s.summary}" for cid, s in self.store.summaries.items()
+        )
+        turns = audit_prompt(
+            manifest,
+            ideas_t,
+            self.outline.render_for_prompt(),
+            self.bible.render_for_prompt()[:1500],
+            cont_t,
+            sums,
+        )
+        data, usage = call_json_with_usage(
+            self.backend, AUDIT_SYSTEM, turns, temperature=0.4, max_tokens=3000
+        )
+        try:
+            self.log_usage(op="audit", model="", usage=usage)
+        except Exception:
+            pass  # noqa: BLE001
+        return data or {"parsed": False}
