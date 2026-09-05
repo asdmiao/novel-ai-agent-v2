@@ -1,0 +1,18 @@
+{
+  "chapter_fit": {
+    "cases": 4,
+    "accuracy": 1.0
+  },
+  "continuity": {
+    "conflict_detection_rate": 1.0,
+    "governance_recovery_rate": 1.0,
+    "provenance_snapshot_consistency": 1.0
+  },
+  "retrieval": {
+    "cases": 20,
+    "baseline": null,
+    "multi_channel": null,
+    "thread_aware": null,
+    "note": "Historical corpus unavailable; no fabricated metrics"
+  }
+}

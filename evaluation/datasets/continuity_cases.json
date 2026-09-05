@@ -1,0 +1,8 @@
+[
+ {"name":"direct conflict","kind":"conflict"},{"name":"no conflict","kind":"none"},
+ {"name":"accepted","kind":"accepted"},{"name":"rejected","kind":"rejected"},
+ {"name":"exception","kind":"resolved_as_exception"},{"name":"supersedes","kind":"supersedes"},
+ {"name":"multiple constraints","kind":"conflict"},{"name":"persistence","kind":"accepted"},
+ {"name":"restart recovery","kind":"recovery"},{"name":"context recovery","kind":"recovery"},
+ {"name":"historical snapshot","kind":"snapshot"}
+]

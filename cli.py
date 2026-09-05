@@ -5,6 +5,7 @@
     python cli.py new mybook --genre 玄幻 --synopsis "..."  # 新建项目
     python cli.py list                       # 列出项目
     python cli.py init mybook --chapters 20  # 从简介生成主线+大纲+设定
+    python cli.py chapters mybook 30         # 调整总章节数并续写/收缩大纲
     python cli.py outline mybook             # 查看大纲
     python cli.py bible mybook               # 查看设定集
     python cli.py write mybook               # 写下一章
@@ -116,6 +117,28 @@ def cmd_init(args: argparse.Namespace) -> int:
     _print(f"✓ 主线：{agent.outline.premise}")
     _print(f"✓ 卷数：{r.get('volume_count')}，章节：{r.get('chapter_count')}")
     _print(f"✓ 设定条目：{r.get('bible_entries', 0)}")
+    return 0
+
+
+def cmd_chapters(args: argparse.Namespace) -> int:
+    """调整项目总章节数；扩展时只追加后续大纲。"""
+    cfg = Config(args.config)
+    agent = NovelAgent.open(args.project, cfg)
+    try:
+        r = agent.resize_outline(args.count)
+    except (ValueError, RuntimeError) as e:
+        _print(f"✗ 调整失败：{e}")
+        return 1
+    if r["action"] == "extended":
+        _print(
+            f"✓ 大纲已从 {r['previous_count']} 章扩展到 {r['chapter_count']} 章，新增 {r['added']} 章。"
+        )
+    elif r["action"] == "shrunk":
+        _print(
+            f"✓ 大纲已从 {r['previous_count']} 章调整为 {r['chapter_count']} 章，移除 {r['removed']} 章待写计划。"
+        )
+    else:
+        _print(f"✓ 当前大纲已经是 {r['chapter_count']} 章，无需调整。")
     return 0
 
 
@@ -701,6 +724,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--chapters", type=int, default=20)
     sp.add_argument("--no-bible", action="store_true", help="跳过设定集生成")
     sp.set_defaults(func=cmd_init)
+
+    sp = sub.add_parser("chapters", help="调整总章节数；扩展时续写后续大纲")
+    sp.add_argument("project", help="项目名")
+    sp.add_argument("count", type=int, help="调整后的总章节数")
+    sp.set_defaults(func=cmd_chapters)
 
     sp = sub.add_parser("outline", help="查看大纲")
     sp.add_argument("project")

@@ -13,7 +13,7 @@ openai:
   base_url: https://api.deepseek.com/v1   # 改成你的服务商
   model: deepseek-chat
   # 可选的"长写"模型（更强更慢），写作章节时用；留空则同 model
-  writer_model:
+  writer_model: deepseek-chat
   temperature: 0.85
   max_tokens: 4096
   timeout: 120

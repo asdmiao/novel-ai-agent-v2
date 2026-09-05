@@ -1,0 +1,17 @@
+[
+  {"idea_id":"i1","placed_chapter":"c004","current_chapter":"c004","expected_decision":"recommended"},
+  {"idea_id":"i2","placed_chapter":"c005","current_chapter":"c004","expected_decision":"candidate"},
+  {"idea_id":"i3","placed_chapter":"c012","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i4","used_chapter":"c003","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i5","status":"pending","current_chapter":"c004","expected_decision":"candidate"},
+  {"idea_id":"i6","status":"planned","current_chapter":"c004","expected_decision":"candidate"},
+  {"idea_id":"i7","status":"dropped","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i8","status":"archived","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i9","status":"rejected","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i10","status":"inactive","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i11","placed_chapter":"c004","current_chapter":"c004","expected_decision":"recommended"},
+  {"idea_id":"i12","placed_chapter":"c006","current_chapter":"c004","expected_decision":"candidate"},
+  {"idea_id":"i13","placed_chapter":"c020","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i14","used_chapter":"c001","current_chapter":"c004","expected_decision":"deferred"},
+  {"idea_id":"i15","status":"pending","current_chapter":"c004","expected_decision":"candidate"}
+]

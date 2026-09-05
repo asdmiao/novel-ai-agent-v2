@@ -4,6 +4,7 @@ from .planner import (
     PLAN_SYSTEM,
     premise_prompt,
     expand_outline_prompt,
+    continue_outline_prompt,
     chapter_plan_prompt,
     bible_from_synopsis_prompt,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "PLAN_SYSTEM",
     "premise_prompt",
     "expand_outline_prompt",
+    "continue_outline_prompt",
     "chapter_plan_prompt",
     "bible_from_synopsis_prompt",
     "WRITE_SYSTEM",

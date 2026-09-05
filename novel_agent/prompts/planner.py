@@ -84,6 +84,58 @@ def expand_outline_prompt(
     ]
 
 
+def continue_outline_prompt(
+    project_meta: str, outline_text: str, summaries_text: str, chapter_count: int
+) -> list[tuple[str, str]]:
+    """根据已有大纲和已写内容，续写后续章节计划。"""
+    return [
+        (
+            "user",
+            f"""请在不改动已有章节计划的前提下，为这部长篇小说续写 **{chapter_count} 章** 后续大纲。
+
+【项目信息】
+{project_meta}
+
+【当前大纲】
+{outline_text or "(暂无大纲)"}
+
+【已写章节摘要】
+{summaries_text or "(尚未写正文)"}
+
+请承接当前最后的剧情推进，保持人物、伏笔、时间线和世界观一致。不要重写、概述或修改已有章节；只规划新增章节。
+
+请输出 JSON（放在 ```json 代码块中）：
+```json
+{{
+  "volumes": [
+    {{
+      "title": "新增卷名",
+      "summary": "本卷主线（1-2句）",
+      "chapters": [
+        {{
+          "title": "章节标题",
+          "pov": "视角人物（可空）",
+          "setting": "发生地点（可空）",
+          "time": "时间线（可空）",
+          "characters": ["出场人物名"],
+          "beat": "本章核心情节（2-3句，具体）",
+          "goal": "本章叙事目标（1句）",
+          "conflict": "本章核心冲突（1句）",
+          "ending": "章末钩子/收束（1句）"
+        }}
+      ]
+    }}
+  ]
+}}
+```
+要求：
+- 新增章节总数必须正好为 {chapter_count} 章
+- 每章都要推动主线，明确承接当前最后的剧情
+- 章节之间要有因果和节奏变化，避免重复已有情节""",
+        )
+    ]
+
+
 def chapter_plan_prompt(context: str, hint: str) -> list[tuple[str, str]]:
     """为单章生成详细 ChapterPlan。"""
     return [

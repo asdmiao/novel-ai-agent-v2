@@ -5,16 +5,14 @@
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
 import sys
 from pathlib import Path
 
 # Windows 控制台 UTF-8
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+# 不在导入阶段替换 stdout/stderr；pytest capture 管理这些流，替换会导致
+# 测试结束时 capture cleanup 访问已关闭的 wrapper。
 
 # 让脚本能 import 项目根的 novel_agent
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +29,7 @@ class MockBackend(LLMBackend):
 
     def __init__(self) -> None:
         self.call_log: list[str] = []
+        self.invalid_continuation_once = False
 
     def chat(
         self, messages, *, model=None, temperature=0.85, max_tokens=None, stop=None, **_
@@ -38,6 +37,13 @@ class MockBackend(LLMBackend):
         text = messages[-1].content if messages else ""
         self.call_log.append(text[:60])
         # 识别调用类型并返回对应内容
+        if "上面的回复无法解析" in text:
+            return _mock_continuation_json()
+        if "续写" in text and "新增章节总数" in text:
+            if self.invalid_continuation_once:
+                self.invalid_continuation_once = False
+                return "我将继续为你规划后续剧情。"
+            return _mock_continuation_json()
         if "故事前提/主线" in text and "volumes" in text or "premise" in text:
             return json.dumps(
                 {
@@ -160,6 +166,25 @@ def _mock_novel_text() -> str:
     ) * 1  # 简化版
 
 
+def _mock_continuation_json() -> str:
+    return json.dumps(
+        {
+            "volumes": [
+                {
+                    "title": "崛起之卷",
+                    "summary": "林尘承接传承之力，开始反击。",
+                    "chapters": [
+                        {"title": "秘境线索", "beat": "林尘得到秘境地图。"},
+                        {"title": "强敌拦路", "beat": "敌对家族截杀林尘。"},
+                        {"title": "初次反击", "beat": "林尘击退追兵，踏入秘境。"},
+                    ],
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
 def main() -> int:
     print("=" * 60)
     print("小说AI 离线测试（mock backend）")
@@ -176,7 +201,7 @@ def main() -> int:
     from novel_agent.agents import NovelAgent
     from novel_agent.core import Project
 
-    print("\n[1/6] 创建测试项目...")
+    print("\n[1/7] 创建测试项目...")
     proj = Project(
         name="_test_mock",
         title="青云传",
@@ -192,10 +217,11 @@ def main() -> int:
     # 用 mock backend 构造 agent（不连真实 LLM）
     from novel_agent import Config
 
-    agent = NovelAgent(proj, Config(), backend=MockBackend())
+    backend = MockBackend()
+    agent = NovelAgent(proj, Config(), backend=backend)
 
     # 2. 生成主线+大纲+设定
-    print("[2/6] 生成主线/大纲/设定集...")
+    print("[2/7] 生成主线/大纲/设定集...")
     r = agent.init_from_synopsis(chapter_count=2, auto_bible=True)
     assert r["chapter_count"] >= 2, f"章节数不对: {r}"
     assert agent.outline.premise, "主线为空"
@@ -204,22 +230,28 @@ def main() -> int:
     print(f"  ✓ 章节: {r['chapter_count']}, 人物: {len(agent.bible.characters)}")
 
     # 3. 丰富第一章计划
-    print("[3/6] 丰富第一章详细计划...")
+    print("[3/7] 丰富第一章详细计划...")
     plan = agent.enrich_next_chapter_plan()
     assert plan is not None, "没有待写章节"
     assert plan.conflict, "冲突字段没填上"
     print(f"  ✓ {plan.chapter_id} 《{plan.title}》冲突: {plan.conflict[:30]}...")
 
     # 4. 写第一章
-    print("[4/6] 写第一章...")
+    print("[4/7] 写第一章...")
     result = agent.write_chapter(plan.chapter_id, review=True)
     assert result["word_count"] > 100, f"正文字数太少: {result['word_count']}"
     assert result["review"], "审校没跑"
+    # Phase 1 provenance：每章生成后应保存上下文来源记录
+    provenance_path = test_dir / "chapters" / "provenance" / f"{plan.chapter_id}.json"
+    assert provenance_path.exists(), "章节 provenance 文件未生成"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    for key in ("deterministic_sources", "selected_ideas", "retrieved_sources", "constraints"):
+        assert key in provenance, f"provenance 缺少字段: {key}"
     print(f"  ✓ 字数: {result['word_count']}")
     print(f"  ✓ 摘要: {result['summary'][:40]}...")
 
     # 5. 验证记忆系统（写第二章时上下文应含第一章摘要）
-    print("[5/6] 验证记忆系统...")
+    print("[5/7] 验证记忆系统...")
     all_ch = agent.outline.all_chapters()
     next_plan = all_ch[1] if len(all_ch) > 1 else all_ch[0]
     ctx = agent._memory().build_context_for_chapter(next_plan.chapter_id)
@@ -227,8 +259,20 @@ def main() -> int:
     assert "废柴少年" in ctx or "林尘" in ctx, "摘要内容没进上下文"
     print(f"  ✓ 上下文长度: {len(ctx)} 字符，含前情提要")
 
-    # 6. 导出
-    print("[6/6] 导出 markdown...")
+    # 6. 调整章节数：扩展时续写，缩短时保留已写章节
+    print("[6/7] 调整章节数并续写大纲...")
+    backend.invalid_continuation_once = True  # 验证格式不合规时会自动重试
+    r = agent.resize_outline(5)
+    assert r["action"] == "extended" and r["added"] == 3, f"续写失败: {r}"
+    assert len(agent.outline.all_chapters()) == 5, "扩展后的章节数不正确"
+    r = agent.resize_outline(4)
+    assert r["action"] == "shrunk" and r["removed"] == 1, f"缩短失败: {r}"
+    assert len(agent.outline.all_chapters()) == 4, "缩短后的章节数不正确"
+    assert agent.outline.find(plan.chapter_id) is not None, "已写章节不应被删除"
+    print("  ✓ 已从 2 章续写到 5 章，再安全缩短到 4 章")
+
+    # 7. 导出
+    print("[7/7] 导出 markdown...")
     out = agent.export_to_file()
     assert out.exists() and out.stat().st_size > 0
     print(f"  ✓ 导出: {out} ({out.stat().st_size} bytes)")

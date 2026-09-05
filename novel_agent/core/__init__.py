@@ -27,6 +27,9 @@ from .ideas import IdeaBank, Idea, IdeaType, IdeaStatus
 from .world import World, WorldElement, WorldCategory
 from .threads import ThreadNetwork, StoryThread, ThreadNode, ThreadType, NodeStatus
 from .memory import Memory
+from .constraints import ConstraintView, ConstraintStatus, ConstraintStrength, ActiveConstraintResolver, adapt_continuity
+from .conflicts import ConflictReport, ConfirmationRecord, detect_conflicts, confirm, load_conflicts, load_confirmations, load_governance_state, save_governance_state
+from .links import IdeaLinkView, IdeaLinkResolver
 
 __all__ = [
     "Project",
@@ -65,4 +68,6 @@ __all__ = [
     "ThreadType",
     "NodeStatus",
     "Memory",
+    "ConstraintView", "ConstraintStatus", "ConstraintStrength", "ActiveConstraintResolver", "adapt_continuity", "ConflictReport", "ConfirmationRecord", "detect_conflicts", "confirm", "load_conflicts", "load_confirmations", "load_governance_state", "save_governance_state",
+    "IdeaLinkView", "IdeaLinkResolver",
 ]

@@ -101,7 +101,63 @@ class SearchEngine:
         self.embed_dir = project_dir / "embeddings"
         self.docs: dict[str, Doc] = {}  # id -> Doc
         self._index_path = self.embed_dir / "docs.json"
+        self._manifest_path = self.embed_dir / "manifest.json"
         self._load_docs()
+
+    def _source_fingerprints(self, project_dir: Path | None = None) -> dict[str, str]:
+        """指纹化项目持久化文件，包含动态章节文件。"""
+        root = project_dir or self.dir
+        files = [p for p in root.glob("*.json") if p.name != "manifest.json"]
+        chdir = root / "chapters"
+        if chdir.exists():
+            files.extend(chdir.rglob("*.md"))
+            files.extend(chdir.glob("summaries.json"))
+        return {str(p.relative_to(root)): f"{p.stat().st_mtime_ns}:{p.stat().st_size}" for p in sorted(set(files))}
+
+    def _manifest(self) -> dict[str, Any] | None:
+        if not self._manifest_path.exists():
+            return None
+        try:
+            return json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def consistency_check(self) -> tuple[bool, str]:
+        """验证 docs、向量元数据和向量矩阵是否一致。"""
+        vi = VectorIndex(self.embed_dir)
+        if vi.vectors is None:
+            return True, "no vectors"
+        if len(self.docs) != len(vi.ids) or len(vi.ids) != len(vi.vectors):
+            return False, "docs/index/vectors count mismatch"
+        if set(self.docs) != set(vi.ids):
+            return False, "docs/index ID mismatch"
+        return True, "ok"
+
+    def is_stale(self, *, vector_model: str = "") -> bool:
+        m = self._manifest()
+        if not m:
+            return True
+        if m.get("sources") != self._source_fingerprints():
+            return True
+        if m.get("doc_count") != len(self.docs):
+            return True
+        ok, _ = self.consistency_check()
+        if not ok:
+            return True
+        if vector_model and m.get("vector_model", "") != vector_model:
+            return True
+        return False
+
+    def ensure_index_fresh(self, *, bible, continuity, world, ideas, store,
+                           project_dir: Path, embedder: EmbeddingBackend | None = None) -> bool:
+        """必要时全量重建索引；返回是否重建。"""
+        model = getattr(embedder, "model", "") if embedder else ""
+        if not self.is_stale(vector_model=model):
+            return False
+        self.index_project(bible=bible, continuity=continuity, world=world,
+                           ideas=ideas, store=store, project_dir=project_dir,
+                           embedder=embedder, vector_model=model)
+        return True
 
     def _load_docs(self) -> None:
         if self._index_path.exists():
@@ -132,6 +188,7 @@ class SearchEngine:
         store,
         project_dir: Path,
         embedder: EmbeddingBackend | None = None,
+        vector_model: str = "",
     ) -> dict[str, int]:
         """从知识库重建文档索引（文本部分）。embedder 非 None 时同时重建向量。"""
         from ..core.outline import ChapterStatus  # noqa: F401
@@ -149,11 +206,36 @@ class SearchEngine:
             )
             counts[kind] = counts.get(kind, 0) + 1
 
-        # 章节正文 + 摘要
+        def chunk_text(text: str, *, size: int = 900, overlap: int = 140) -> list[str]:
+            text = text.strip()
+            if not text:
+                return []
+            if len(text) <= size:
+                return [text]
+            parts: list[str] = []
+            start = 0
+            while start < len(text):
+                end = min(len(text), start + size)
+                parts.append(text[start:end])
+                if end >= len(text):
+                    break
+                start = max(end - overlap, start + 1)
+            return parts
+
+        # 章节正文 + 摘要（正文按片段切分，避免整章过长导致检索粒度太粗）
         for cid in store.ordered_ids():
             ch = store.read_chapter(project_dir, cid)
             if ch:
-                add(f"chapter:{cid}", "chapter", cid, ch.content, f"《{ch.title}》")
+                for i, chunk in enumerate(chunk_text(ch.content), start=1):
+                    add(
+                        f"chapter:{cid}:chunk:{i}",
+                        "chapter_chunk",
+                        cid,
+                        chunk,
+                        f"《{ch.title}》#{i}",
+                        chunk_index=i,
+                        chunk_count=len(chunk_text(ch.content)),
+                    )
             s = store.summaries.get(cid)
             if s:
                 add(f"summary:{cid}", "summary", cid, s.summary, f"摘要 {cid}")
@@ -270,7 +352,23 @@ class SearchEngine:
                 for d, v in zip(chunk, vecs):
                     vi.upsert(d.id, v)
             counts["vectors"] = len(doc_list)
+        else:
+            # 文本索引重建时清除旧向量，避免 docs 与 vectors 属于不同 generation。
+            for stale in (self.embed_dir / "vec.npy", self.embed_dir / "index.json"):
+                if stale.exists():
+                    stale.unlink()
 
+        ok, reason = self.consistency_check()
+        if not ok:
+            raise RuntimeError(f"索引一致性检查失败: {reason}")
+        manifest = {
+            "version": 1,
+            "sources": self._source_fingerprints(project_dir),
+            "doc_count": len(self.docs),
+            "vector_count": len(VectorIndex(self.embed_dir).ids),
+            "vector_model": vector_model or (getattr(embedder, "model", "") if embedder else ""),
+        }
+        self._manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         return counts
 
     # ---- 关键词搜索（零依赖）----
@@ -326,6 +424,9 @@ class SearchEngine:
         top_k: int = 10,
     ) -> list[Hit]:
         vi = VectorIndex(self.embed_dir, embedder.dim)
+        ok, reason = self.consistency_check()
+        if not ok:
+            raise RuntimeError(f"索引损坏，禁止语义检索: {reason}")
         if vi.vectors is None or len(vi.ids) == 0:
             return []
         qv = embedder.embed_one(query)
@@ -341,6 +442,57 @@ class SearchEngine:
                 Hit(doc=doc, score=score, snippet=self._snippet(doc.text, query))
             )
         return hits[:top_k]
+
+    def retrieve(
+        self,
+        query: str,
+        *,
+        embedder: EmbeddingBackend | None = None,
+        kinds: list[str] | None = None,
+        top_k: int = 8,
+    ) -> list[Hit]:
+        """优先语义检索，失败或未配置 embedding 时回退到关键词检索。"""
+        if embedder is not None:
+            try:
+                hits = self.search_semantic(query, embedder, kinds=kinds, top_k=top_k)
+                if hits:
+                    return hits
+            except Exception:  # noqa: BLE001
+                pass
+        return self.search_keyword(query, kinds=kinds, limit=top_k)
+
+    def hybrid_search(
+        self, query: str, *, embedder: EmbeddingBackend | None = None,
+        kinds: list[str] | None = None, top_k: int = 8,
+    ) -> list[Hit]:
+        """混合召回并重排：关键词精确命中 + 向量语义命中。"""
+        lexical = self.search_keyword(query, kinds=kinds, limit=top_k * 3)
+        semantic = []
+        if embedder is not None:
+            try:
+                semantic = self.search_semantic(query, embedder, kinds=kinds, top_k=top_k * 3)
+            except Exception:  # noqa: BLE001
+                semantic = []
+        merged: dict[str, Hit] = {}
+        for hit in lexical:
+            merged[hit.doc.id] = Hit(hit.doc, hit.score * 0.45, hit.snippet)
+        for hit in semantic:
+            old = merged.get(hit.doc.id)
+            score = hit.score * 0.55
+            merged[hit.doc.id] = Hit(hit.doc, (old.score if old else 0.0) + score, hit.snippet)
+        # 类型先验提升事实/连续性资料，同时避免同一 ref 占满结果。
+        priors = {"foreshadow": 0.12, "fact": 0.10, "promise": 0.10, "summary": 0.06}
+        ranked = sorted(merged.values(), key=lambda h: -(h.score + priors.get(h.doc.kind, 0)))
+        selected: list[Hit] = []
+        refs: set[str] = set()
+        for hit in ranked:
+            if hit.doc.ref in refs and hit.doc.kind == "chapter_chunk":
+                continue
+            selected.append(hit)
+            refs.add(hit.doc.ref)
+            if len(selected) >= top_k:
+                break
+        return selected
 
     # ---- 伏笔反查 ----
     def find_foreshadow_refs(self, keyword: str) -> list[Hit]:

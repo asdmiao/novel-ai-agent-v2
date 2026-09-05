@@ -18,6 +18,26 @@ from .manifesto import Manifesto
 from .outline import Outline, ChapterStatus
 from .threads import ThreadNetwork
 from .world import World
+from .search import SearchEngine
+from ..llm.embedding import build_embedding
+from .idea_retrieval import IdeaRetriever
+from .constraints import adapt_continuity, ActiveConstraintResolver
+from .conflicts import detect_conflicts, load_conflicts, load_confirmations, load_governance_state
+from .links import IdeaLinkResolver
+from .chapter_fit import ChapterFitResolver
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ContextBundle:
+    text: str
+    deterministic_sources: list[dict] = field(default_factory=list)
+    selected_ideas: list[dict] = field(default_factory=list)
+    retrieved_sources: list[dict] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    threads: list[dict] = field(default_factory=list)
+    conflicts: list[dict] = field(default_factory=list)
+    confirmations: list[dict] = field(default_factory=list)
 
 
 class Memory:
@@ -35,6 +55,9 @@ class Memory:
         ideas: IdeaBank | None = None,
         threads: ThreadNetwork | None = None,
         manifesto: Manifesto | None = None,
+        embedding_config: dict | None = None,
+        rag_top_k: int = 6,
+        rag_max_chars: int = 5000,
         recent_summary_count: int = 3,
         recent_text_chars: int = 600,
     ) -> None:
@@ -47,10 +70,16 @@ class Memory:
         self.ideas = ideas or IdeaBank()
         self.threads = threads or ThreadNetwork()
         self.manifesto = manifesto or Manifesto()
+        self.embedding_config = embedding_config or {}
+        self.rag_top_k = rag_top_k
+        self.rag_max_chars = rag_max_chars
         self.recent_summary_count = recent_summary_count
         self.recent_text_chars = recent_text_chars
 
     def build_context_for_chapter(self, chapter_id: str) -> str:
+        return self.build_context_bundle(chapter_id).text
+
+    def build_context_bundle(self, chapter_id: str) -> ContextBundle:
         """为"写第 chapter_id 章"组装上下文。
 
         包含：
@@ -109,7 +138,67 @@ class Memory:
         # 5. 当前章节计划
         current = plan.render_for_prompt()
 
+        # RAG: 用当前章节的剧情要素召回历史片段、设定和连续性资料。
+        rag_query = " ".join(
+            x for x in [plan.title, plan.beat, plan.goal, plan.conflict, plan.ending]
+            if x
+        )
+        rag_text = ""
+        retrieved_sources: list[dict] = []
+        if rag_query:
+            engine = SearchEngine(self.project_dir)
+            embedder = None
+            if self.embedding_config:
+                try:
+                    embedder = build_embedding(self.embedding_config)
+                except Exception:  # noqa: BLE001
+                    embedder = None
+            # 首次使用时自动建立向量索引；已有索引则直接复用。
+            engine.ensure_index_fresh(bible=self.bible, continuity=self.continuity,
+                world=self.world, ideas=self.ideas, store=self.store,
+                project_dir=self.project_dir, embedder=embedder)
+            # 查询改写：去掉常见叙事虚词，保留实体与剧情谓词，提高召回精度。
+            stopwords = {"本章", "这一章", "需要", "进行", "发生", "以及", "相关"}
+            retrieval_query = " ".join(
+                token for token in rag_query.split() if token not in stopwords
+            ) or rag_query
+            hits = engine.hybrid_search(
+                retrieval_query, embedder=embedder,
+                kinds=["chapter_chunk", "summary", "character", "location",
+                       "faction", "item", "lore", "world", "foreshadow",
+                       "fact", "promise"],
+                top_k=self.rag_top_k,
+            )
+            seen: set[str] = set()
+            lines: list[str] = []
+            used = 0
+            for hit in hits:
+                key = f"{hit.doc.ref}:{hit.doc.text[:80]}"
+                if key in seen:
+                    continue
+                source = hit.doc.ref
+                block = f"【来源:{source} | {hit.doc.title or hit.doc.kind} | 相关度:{hit.score:.2f}】{hit.doc.text}"
+                if used + len(block) > self.rag_max_chars:
+                    break
+                seen.add(key)
+                lines.append(block)
+                retrieved_sources.append({"source_id": hit.doc.id, "source_type": hit.doc.kind,
+                    "source_ref": hit.doc.ref, "score": hit.score, "retrieval_method": "hybrid"})
+                used += len(block)
+            rag_text = "\n".join(lines)
+
         # 连续性约束（伏笔/持有物/承诺/既定事实）——防止长篇崩坏的关键
+        continuity_views = adapt_continuity(self.continuity, self.bible, self.world)
+        governance = load_governance_state(self.project_dir)
+        for c in continuity_views:
+            saved = governance.get("constraints", {}).get(c.id, {})
+            if saved:
+                c.status = saved.get("status", c.status)
+                c.supersedes = list(saved.get("supersedes", c.supersedes))
+        active_views = ActiveConstraintResolver().resolve(continuity_views, chapter_id)
+        persisted_conflicts = load_conflicts(self.project_dir)
+        conflict_reports = persisted_conflicts or detect_conflicts(active_views)
+        confirmations = load_confirmations(self.project_dir)
         continuity_text = self.continuity.render_for_prompt()
 
         # 世界观硬约束（绝对不能违反）
@@ -118,40 +207,28 @@ class Memory:
         # 故事线脉络（让 LLM 知道当前在哪条线的哪个节点）
         threads_text = self.threads.render_for_prompt(only_active=True)
 
-        # 相关 idea：优先 placed_chapter==本章 的，再补充人物匹配的
+        # Idea 多通道召回与重排（保留原规则信号）
         ideas_text = ""
         available = self.ideas.available()
+        selected_ideas = []
+        link_resolver = IdeaLinkResolver(self.ideas, self.threads)
         if available:
-            # ① 第一优先：digest 明确规划到本章的 idea（连接 idea 与大纲的关键）
-            planned_for_this = [i for i in available if i.placed_chapter == chapter_id]
-            # ② 第二优先：按本章人物匹配
-            chapter_chars = (
-                [plan.pov] + (plan.characters or [])
-                if plan.pov
-                else (plan.characters or [])
-            )
-            char_matched: list = []
-            if chapter_chars:
-                char_matched = [
-                    i
-                    for i in available
-                    if i not in planned_for_this
-                    and any(
-                        any(ic in ch or ch in ic for ic in i.related_chars)
-                        for ch in chapter_chars
-                    )
-                ]
-            # 合并：规划到本章的在前，人物匹配的在后，去重
-            pool = planned_for_this + char_matched
-            seen = set()
-            deduped = []
-            for i in pool:
-                if i.id not in seen:
-                    seen.add(i.id)
-                    deduped.append(i)
-            pool = deduped or available  # 兜底：都没有就全量
-            pool = sorted(pool, key=lambda i: -i.priority)[:8]
+            engine = SearchEngine(self.project_dir)
+            embedder_for_ideas = None
+            if self.embedding_config:
+                try: embedder_for_ideas = build_embedding(self.embedding_config)
+                except Exception: pass
+            engine.ensure_index_fresh(bible=self.bible, continuity=self.continuity, world=self.world, ideas=self.ideas, store=self.store, project_dir=self.project_dir, embedder=embedder_for_ideas)
+            results = IdeaRetriever().retrieve(plan=plan, ideas=self.ideas, threads=self.threads, search_engine=engine, embedder=embedder_for_ideas, project_dir=self.project_dir, top_k=8)
+            pool = [r.idea for r in results]
             ideas_text = self.ideas.render_for_prompt(pool)
+            selected_ideas = []
+            for r in results:
+                link = link_resolver.resolve(r.idea.id)
+                fit = ChapterFitResolver().resolve(r.idea, chapter_id, self.threads, link)
+                if fit.decision == "deferred":
+                    continue
+                selected_ideas.append({"source_id": r.source_id, "source_type": "idea", "source_ref": r.idea.id, "selection_reason": "+".join(r.retrieval_channels), "retrieval_channels": r.retrieval_channels, "score": r.final_score, "status": r.status, "reasons": r.reasons + fit.reasons, "thread_ids": link.thread_ids, "planned_chapters": link.planned_chapters, "used_chapters": link.used_chapters, "chapter_fit": fit.chapter_fit, "decision": fit.decision, "selected": True, "used": "unknown"})
 
         parts: list[str] = []
 
@@ -168,6 +245,13 @@ class Memory:
         if continuity_text:
             parts.append("===== 连续性约束（务必遵守，不得违反）=====")
             parts.append(continuity_text)
+        hard = [c for c in active_views if c.strength == "hard"]
+        if hard:
+            parts.append("===== ACTIVE CONTINUITY CONSTRAINTS =====")
+            parts.append("\n".join(f"[HARD][{c.id}] {c.content}" for c in hard))
+        if conflict_reports:
+            parts.append("===== UNRESOLVED CONTINUITY CONFLICTS =====")
+            parts.append("\n".join(f"{r.conflict_id}: {r.constraint_a} vs {r.constraint_b}" for r in conflict_reports))
         if threads_text:
             parts.append("===== 故事线脉络（本章需推进的线）=====")
             parts.append(threads_text)
@@ -182,9 +266,33 @@ class Memory:
         if ideas_text:
             parts.append("===== 可用灵感 idea（可酌情融入本章）=====")
             parts.append(ideas_text)
+        if rag_text:
+            parts.append("===== RAG 检索到的相关资料（仅作事实参考）=====")
+            parts.append(rag_text)
         parts.append("===== 本章写作计划 =====")
         parts.append(current)
-        return "\n\n".join(parts)
+        deterministic_sources = []
+        for sid, stype, sref in [
+            ("manifesto", "manifesto", "manifesto"),
+            ("bible", "bible", "bible.json"),
+            ("world", "world", "world.json"),
+            ("continuity", "continuity", "continuity.json"),
+            ("threads", "threads", "threads.json"),
+            ("outline", "outline", "outline.json"),
+        ]:
+            deterministic_sources.append({"source_id": sid, "source_type": stype, "source_ref": sref, "selection_reason": "deterministic"})
+        if summaries_block:
+            deterministic_sources.append({"source_id": "recent_summaries", "source_type": "summary", "source_ref": "chapters/summaries.json", "selection_reason": "deterministic"})
+        if prev_text:
+            deterministic_sources.append({"source_id": f"chapter:{done_ids[-1]}:tail", "source_type": "chapter_tail", "source_ref": done_ids[-1], "selection_reason": "deterministic"})
+        idea_thread_links = {i["source_ref"]: i.get("thread_ids", []) for i in selected_ideas}
+        used_thread_ids = sorted({x for i in selected_ideas for x in i.get("thread_ids", [])})
+        thread_snapshot = [{"thread_id": t.id, "chapter_ids": sorted({n.chapter_id for n in t.nodes if n.chapter_id})} for t in self.threads.threads if t.id in used_thread_ids]
+        conflict_snapshot = [{"conflict_id": r.conflict_id, "constraint_a": r.constraint_a, "constraint_b": r.constraint_b, "status": r.status} for r in conflict_reports]
+        return ContextBundle(text="\n\n".join(parts), deterministic_sources=deterministic_sources,
+            selected_ideas=selected_ideas, retrieved_sources=retrieved_sources,
+            constraints=[{"constraint_id": c.id, "type": c.type, "strength": c.strength, "content": c.content, "source_chapter": c.source_chapter, "status": c.status, "supersedes": c.supersedes} for c in active_views], threads=thread_snapshot, conflicts=conflict_snapshot,
+            confirmations=[{"confirmation_id": r.id, "conflict_id": r.conflict_id, "action": r.action, "timestamp": r.timestamp, "author": r.author, "note": r.note} for r in confirmations])
 
     def _compact_outline(self, chapters) -> str:  # type: ignore[no-untyped-def]
         lines = []

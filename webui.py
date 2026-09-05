@@ -11,6 +11,7 @@ import gradio as gr
 from novel_agent import Config
 from novel_agent.agents import NovelAgent
 from novel_agent.core.outline import ChapterStatus
+import json
 
 
 def _load_agent(project_name: str) -> NovelAgent:
@@ -25,6 +26,29 @@ def _load_agent(project_name: str) -> NovelAgent:
 
 def refresh_projects() -> list[str]:
     return NovelAgent.list_projects() or ["(无项目)"]
+
+def _diagnostic(name: str, chapter_id: str) -> str:
+    """只读展示已保存 provenance，不重新计算上下文。"""
+    if not name or not chapter_id: return "请选择项目和章节。"
+    agent = _load_agent(name)
+    p = agent.dir / "chapters" / "provenance" / f"{chapter_id}.json"
+    if not p.exists(): return f"### Context Diagnostic — {chapter_id}\n\n暂无该章节 provenance。请先写作。"
+    d=json.loads(p.read_text(encoding="utf-8"))
+    def section(title,key):
+        value=d.get(key,[]) or []
+        return f"### {title} ({len(value)})\n\n```json\n{json.dumps(value,ensure_ascii=False,indent=2)}\n```"
+    return "\n\n".join([f"# Context Diagnostic — {chapter_id}", section("Ideas","selected_ideas"), section("Threads","threads"), section("Retrieved Sources","retrieved_sources"), section("Continuity Governance","constraints"), section("Conflicts","conflicts_detected"), section("Confirmations","confirmations"), "### Snapshot Source\n\nChapter Provenance"])
+
+def ui_diagnostic_tab(proj_dropdown) -> None:
+    gr.Markdown("## Context Diagnostic\n只读查看写章时保存的 Context / Provenance 快照。")
+    chapter=gr.Dropdown([], label="章节")
+    load_btn=gr.Button("🔄 加载章节")
+    view=gr.Markdown("")
+    def load_chapters(name):
+        if not name: return gr.update(choices=[], value=None)
+        a=_load_agent(name); ch=a.outline.all_chapters(); return gr.update(choices=[c.chapter_id for c in ch], value=ch[0].chapter_id if ch else None)
+    load_btn.click(load_chapters,[proj_dropdown],[chapter])
+    chapter.change(_diagnostic,[proj_dropdown,chapter],[view])
 
 
 # ============ Tab: 项目管理 ============
@@ -126,10 +150,16 @@ def ui_project_tab() -> "gr.Dropdown":
 # ============ Tab: 大纲与设定 ============
 def ui_outline_tab(proj_dropdown) -> None:
     gr.Markdown(
-        "## 大纲 & 设定集\n查看自动生成（或手动编辑 JSON）的剧情骨架与世界观设定。"
+        "## 大纲 & 设定集\n查看剧情骨架与世界观设定；也可调整总章节数，扩展时会承接现有内容继续生成大纲。"
     )
     with gr.Row():
         load_btn = gr.Button("📂 加载", variant="primary")
+    with gr.Row():
+        target_chapters = gr.Number(
+            value=20, precision=0, minimum=1, label="目标总章节数"
+        )
+        resize_btn = gr.Button("↔️ 调整并续写大纲", variant="secondary")
+    resize_status = gr.Markdown("")
     outline_md = gr.Markdown("", label="大纲")
     with gr.Accordion("设定集", open=False):
         bible_md = gr.Markdown("")
@@ -140,9 +170,43 @@ def ui_outline_tab(proj_dropdown) -> None:
             text = agent.outline.render_for_prompt()
         else:
             text = "_(暂无大纲，请到「项目」标签创建并勾选自动生成，或在「写作」标签里逐章规划)_"
-        return text, agent.bible.render_for_prompt()
+        return text, agent.bible.render_for_prompt(), len(agent.outline.all_chapters())
 
-    load_btn.click(load, [proj_dropdown], [outline_md, bible_md])
+    load_btn.click(load, [proj_dropdown], [outline_md, bible_md, target_chapters])
+
+    def sync_target(name):
+        if not name or name == "(无项目)":
+            return gr.update(value=1)
+        try:
+            return gr.update(value=len(_load_agent(name).outline.all_chapters()) or 1)
+        except Exception:  # noqa: BLE001
+            return gr.update()
+
+    proj_dropdown.change(sync_target, [proj_dropdown], [target_chapters])
+
+    def resize(name, count):
+        try:
+            agent = _load_agent(name)
+            result = agent.resize_outline(int(count))
+        except (TypeError, ValueError, RuntimeError) as e:
+            raise gr.Error(str(e))
+        if result["action"] == "extended":
+            message = (
+                f"✓ 已从 {result['previous_count']} 章扩展至 {result['chapter_count']} 章，"
+                f"并新增 {result['added']} 章后续大纲。"
+            )
+        elif result["action"] == "shrunk":
+            message = (
+                f"✓ 已从 {result['previous_count']} 章缩减至 {result['chapter_count']} 章，"
+                f"仅移除了 {result['removed']} 章尚未写作的计划。"
+            )
+        else:
+            message = f"✓ 当前大纲已经是 {result['chapter_count']} 章。"
+        return message, agent.outline.render_for_prompt()
+
+    resize_btn.click(
+        resize, [proj_dropdown, target_chapters], [resize_status, outline_md]
+    )
 
 
 # ============ Tab: 写作 ============
@@ -498,6 +562,8 @@ def build_ui() -> gr.Blocks:
             ui_continuity_tab(proj_dropdown)
         with gr.Tab("知识库"):
             ui_kb_tab(proj_dropdown)
+        with gr.Tab("Context Diagnostic"):
+            ui_diagnostic_tab(proj_dropdown)
         with gr.Tab("后端测试"):
             ui_backend_tab()
     return demo
@@ -506,7 +572,6 @@ def build_ui() -> gr.Blocks:
 if __name__ == "__main__":
     build_ui().launch(
         server_name="127.0.0.1",
-        server_port=7860,
         inbrowser=True,
         theme=gr.themes.Soft(),
     )

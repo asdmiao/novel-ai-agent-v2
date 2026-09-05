@@ -129,6 +129,9 @@ class NovelAgent:
             ideas=self.ideas,
             threads=self.threads,
             manifesto=self.manifesto,
+            embedding_config=self.config.embedding,
+            rag_top_k=int(self.config.writing.get("rag_top_k", 6)),
+            rag_max_chars=int(self.config.writing.get("rag_max_chars", 5000)),
             recent_summary_count=self.recent_summary_count,
             recent_text_chars=self.recent_text_chars,
         )
@@ -188,6 +191,142 @@ class NovelAgent:
 
         self.save_all()
         return result
+
+    def resize_outline(self, target_chapters: int) -> dict[str, Any]:
+        """将总章节数调整为目标值；扩展时承接现有剧情生成后续大纲。
+
+        已写正文或已经进入非 pending 状态的章节绝不会被删除。缩短时仅从
+        大纲末尾移除待写章节；扩展时才调用模型，且模型失败不会改变现有大纲。
+        """
+        if target_chapters < 1:
+            raise ValueError("目标章节数必须至少为 1")
+
+        chapters = self.outline.all_chapters()
+        current = len(chapters)
+        protected = [
+            ch
+            for ch in chapters
+            if ch.status != ChapterStatus.pending or self.store.has(ch.chapter_id)
+        ]
+
+        if target_chapters == current:
+            return {
+                "action": "unchanged",
+                "previous_count": current,
+                "chapter_count": current,
+                "added": 0,
+                "removed": 0,
+            }
+
+        if target_chapters < current:
+            if target_chapters < len(protected):
+                raise ValueError(
+                    f"目标为 {target_chapters} 章，但已有 {len(protected)} 章已写或已开始写作，不能删除。"
+                )
+            remove_count = current - target_chapters
+            removable = [
+                ch for ch in reversed(chapters) if ch not in protected
+            ]
+            if len(removable) < remove_count:
+                raise ValueError("没有足够的待写章节可删除")
+            for chapter in removable[:remove_count]:
+                self.outline.remove_chapter(chapter.chapter_id)
+            self.outline.volumes = [v for v in self.outline.volumes if v.chapters]
+            self.outline.save(self.dir)
+            return {
+                "action": "shrunk",
+                "previous_count": current,
+                "chapter_count": len(self.outline.all_chapters()),
+                "added": 0,
+                "removed": remove_count,
+            }
+
+        add_count = target_chapters - current
+        # 只给模型最后的 30 章计划，避免长篇大纲占满上下文。
+        recent_chapters = chapters[-30:]
+        recent_outline = "\n".join(ch.render_for_prompt() for ch in recent_chapters)
+        summaries = [
+            self.store.summaries[cid]
+            for cid in self.store.ordered_ids()[-10:]
+            if cid in self.store.summaries
+        ]
+        summaries_text = "\n".join(
+            f"【{s.chapter_id} {s.title}】{s.summary}" for s in summaries
+        )
+        plan = self.planner.continue_outline(
+            self.project.meta_for_prompt(), recent_outline, summaries_text, add_count
+        )
+        if not isinstance(plan, dict):
+            raise RuntimeError(
+                "模型连续两次没有返回可解析的续写大纲。请稍后重试，或一次只增加较少章节。"
+            )
+
+        raw_volumes = plan.get("volumes")
+        # 兼容部分模型直接输出 {"chapters": [...]} 的常见格式。
+        if not isinstance(raw_volumes, list):
+            raw_chapters = plan.get("chapters")
+            if isinstance(raw_chapters, list):
+                raw_volumes = [
+                    {
+                        "title": "后续章节",
+                        "summary": "承接当前剧情的后续发展。",
+                        "chapters": raw_chapters,
+                    }
+                ]
+            else:
+                raise RuntimeError("模型返回的续写大纲缺少 chapters 列表")
+        planned: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for raw_volume in raw_volumes:
+            if not isinstance(raw_volume, dict):
+                continue
+            raw_chapters = raw_volume.get("chapters", [])
+            if not isinstance(raw_chapters, list):
+                continue
+            for raw_chapter in raw_chapters:
+                if isinstance(raw_chapter, dict):
+                    planned.append((raw_volume, raw_chapter))
+        if len(planned) < add_count:
+            raise RuntimeError(
+                f"模型只生成了 {len(planned)} 章，未达到需要补充的 {add_count} 章；原大纲未修改。"
+            )
+
+        volumes_by_index: dict[int, Volume] = {}
+        for raw_volume, raw_chapter in planned[:add_count]:
+            key = id(raw_volume)
+            if key not in volumes_by_index:
+                volume_number = len(self.outline.volumes) + 1
+                volumes_by_index[key] = Volume(
+                    volume_id=f"v{volume_number}",
+                    title=_to_str(raw_volume.get("title")) or f"第{volume_number}卷",
+                    summary=_to_str(raw_volume.get("summary")),
+                )
+                self.outline.volumes.append(volumes_by_index[key])
+            volume = volumes_by_index[key]
+            volume.chapters.append(
+                ChapterPlan(
+                    chapter_id=self.outline.next_chapter_id(),
+                    title=_to_str(raw_chapter.get("title")),
+                    pov=_to_str(raw_chapter.get("pov")),
+                    setting=_to_str(raw_chapter.get("setting")),
+                    time=_to_str(raw_chapter.get("time")),
+                    characters=[str(x) for x in raw_chapter.get("characters", [])]
+                    if isinstance(raw_chapter.get("characters"), list)
+                    else [],
+                    beat=_to_str(raw_chapter.get("beat")),
+                    goal=_to_str(raw_chapter.get("goal")),
+                    conflict=_to_str(raw_chapter.get("conflict")),
+                    ending=_to_str(raw_chapter.get("ending")),
+                    word_target=self.chapter_words,
+                )
+            )
+        self.outline.save(self.dir)
+        return {
+            "action": "extended",
+            "previous_count": current,
+            "chapter_count": len(self.outline.all_chapters()),
+            "added": add_count,
+            "removed": 0,
+        }
 
     def _merge_bible(self, data: dict[str, Any]) -> None:
         from ..core.bible import Character, Faction, Item, Location, Lore
@@ -257,7 +396,8 @@ class NovelAgent:
         plan.status = ChapterStatus.writing
         self.save_all()
 
-        ctx = self._memory().build_context_for_chapter(chapter_id)
+        context_bundle = self._memory().build_context_bundle(chapter_id)
+        ctx = context_bundle.text
 
         # 生成正文（带重试）
         content = ""
@@ -289,6 +429,26 @@ class NovelAgent:
             summary = content[:200]
 
         self.store.write_chapter(self.dir, plan, content, summary, source="ai")
+        # 保存本章实际使用的上下文来源；旧项目无此文件时不影响既有流程。
+        try:
+            import json
+            prov_path = self.dir / "chapters" / "provenance"
+            prov_path.mkdir(parents=True, exist_ok=True)
+            (prov_path / f"{chapter_id}.json").write_text(
+                json.dumps({
+                    "chapter_id": chapter_id,
+                    "deterministic_sources": context_bundle.deterministic_sources,
+                    "selected_ideas": context_bundle.selected_ideas,
+                    "ideas": context_bundle.selected_ideas,
+                    "threads": context_bundle.threads,
+                    "retrieved_sources": context_bundle.retrieved_sources,
+                    "constraints": context_bundle.constraints,
+                    "active_constraints": context_bundle.constraints,
+                    "conflicts_detected": context_bundle.conflicts,
+                    "confirmations": context_bundle.confirmations,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         plan.status = ChapterStatus.drafted
         self.save_all()
 

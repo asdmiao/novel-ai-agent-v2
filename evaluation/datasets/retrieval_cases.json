@@ -1,0 +1,22 @@
+[
+  {"query":"地图 秘境","expected_idea_ids":["i_001"]},
+  {"query":"妹妹 生辰","expected_idea_ids":["i_002"]},
+  {"query":"家族 复仇","expected_idea_ids":["i_003"]},
+  {"query":"古洞 传承","expected_idea_ids":["i_004"]},
+  {"query":"敌人 截杀","expected_idea_ids":["i_005"]},
+  {"query":"青云村","expected_idea_ids":["i_006"]},
+  {"query":"灵石","expected_idea_ids":["i_007"]},
+  {"query":"秘境 线索","expected_idea_ids":["i_008"]},
+  {"query":"主角 成长","expected_idea_ids":["i_009"]},
+  {"query":"守护 亲人","expected_idea_ids":["i_010"]},
+  {"query":"修炼 境界","expected_idea_ids":["i_011"]},
+  {"query":"反转 真相","expected_idea_ids":["i_012"]},
+  {"query":"悬念 伏笔","expected_idea_ids":["i_013"]},
+  {"query":"师父 教导","expected_idea_ids":["i_014"]},
+  {"query":"战斗 受伤","expected_idea_ids":["i_015"]},
+  {"query":"联盟 同伴","expected_idea_ids":["i_016"]},
+  {"query":"皇城 阴谋","expected_idea_ids":["i_017"]},
+  {"query":"古剑 宝物","expected_idea_ids":["i_018"]},
+  {"query":"离别 情感","expected_idea_ids":["i_019"]},
+  {"query":"最终 决战","expected_idea_ids":["i_020"]}
+]
